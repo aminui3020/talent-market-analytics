@@ -10,6 +10,8 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.jsonl
+live_jobs.csv
+live_jobs.csv.gz
 
 # macOS
 .DS_Store

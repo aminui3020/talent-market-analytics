@@ -10,6 +10,7 @@ on:
         default: 'all'
         options:
           - all
+          - adp
           - greenhouse
           - lever
           - ashby
@@ -43,6 +44,7 @@ on:
         default: 'exports/us_companies_by_ats_master.csv'
         options:
           - 'exports/us_companies_by_ats_master.csv'
+          - 'exports/us_adp_companies.csv'
           - 'greenhouse_companies_us_active.txt'
           - 'exports/us_greenhouse_companies.csv'
           - 'exports/us_lever_companies.csv'

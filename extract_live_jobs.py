@@ -1783,8 +1783,94 @@ async def extract_workday(http: AsyncHTTPClient, slug_or_url: str, full_content:
     return 200, extracted
 
 
+async def extract_adp(http: AsyncHTTPClient, slug_or_url: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    """
+    Extracts live jobs from ADP Workforce Now public recruitment API.
+    Handles slug as cid, cid/ccId, or full recruitment board URL.
+    """
+    raw = slug_or_url.strip()
+    cid = raw
+    ccid = None
+    if "cid=" in raw:
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(raw).query)
+        cid = qs.get("cid", [raw])[0]
+        ccid = qs.get("ccId", [None])[0]
+    elif "/" in raw:
+        parts = raw.split("/", 1)
+        cid = parts[0]
+        ccid = parts[1]
+
+    api_url = f"https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions?cid={cid}&lang=en_US&$top=100&$skip=0"
+    if ccid:
+        api_url += f"&ccId={ccid}"
+
+    status, data = await http.get_json(api_url)
+    if status != 200 or not isinstance(data, dict):
+        return status, []
+
+    items = data.get("jobRequisitions") or []
+    extracted = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for item in items:
+        item_id = str(item.get("itemID") or "")
+        title = (item.get("requisitionTitle") or "").strip()
+        locations = [
+            loc.get("nameCode", {}).get("shortName", "")
+            for loc in item.get("requisitionLocations", [])
+            if isinstance(loc, dict)
+        ]
+        loc_str = "; ".join(filter(None, locations))
+        post_date = item.get("postDate") or ""
+
+        pay = item.get("payGradeRange") or {}
+        min_rate = (pay.get("minimumRate") or {}).get("amountValue")
+        max_rate = (pay.get("maximumRate") or {}).get("amountValue")
+        curr = (pay.get("minimumRate") or {}).get("currencyCode") or (pay.get("maximumRate") or {}).get("currencyCode") or "USD"
+
+        job_url = f"https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid={cid}&jobId={item_id}&lang=en_US"
+        if ccid:
+            job_url += f"&ccId={ccid}"
+
+        content_raw = ""
+        if full_content and item_id:
+            detail_url = f"https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions/{item_id}?cid={cid}&lang=en_US"
+            d_status, d_data = await http.get_json(detail_url)
+            if d_status == 200 and isinstance(d_data, dict):
+                content_raw = d_data.get("requisitionDescription") or ""
+
+        job_rec = {
+            "job_id": f"adp_{cid}_{item_id}",
+            "platform": "adp",
+            "company_name": cid,
+            "company_slug": cid,
+            "title": title,
+            "location": loc_str,
+            "is_us": 1 if is_us_location(loc_str, extra_text=title) else 0,
+            "apply_url": job_url,
+            "department": "",
+            "office": "",
+            "employment_type": "",
+            "posted_at": parse_to_iso(post_date),
+            "updated_at": parse_to_iso(post_date),
+            "raw_timestamp": str(post_date),
+            "content": clean_html(content_raw) if full_content else "",
+            "extracted_at": now_iso,
+        }
+        if min_rate is not None or max_rate is not None:
+            job_rec["salary_min"] = min_rate
+            job_rec["salary_max"] = max_rate
+            job_rec["salary_currency"] = curr
+
+        extracted.append(job_rec)
+
+    return status, extracted
+
+
 PLATFORM_HANDLERS = {
     # Tier 1 & 2 Modern ATS
+    "adp": extract_adp,
     "greenhouse": extract_greenhouse,
     "lever": extract_lever,
     "ashby": extract_ashby,
@@ -2299,6 +2385,8 @@ def load_companies(input_path: str, default_platform: str) -> List[Tuple[str, st
                 ats = (row.get("ats_id") or row.get("platform") or default_platform).strip().lower()
                 board_url = (row.get("board_url") or "").strip()
                 if ats == "workday" and board_url:
+                    slug = board_url
+                if ats == "adp" and board_url and not slug:
                     slug = board_url
                 if slug:
                     pairs.append((ats, slug))
