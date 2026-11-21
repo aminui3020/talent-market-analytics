@@ -115,6 +115,16 @@ on:
         required: true
         type: boolean
         default: true
+      target_country:
+        description: '🌍 Target Country Filter (us, india, us_and_india, all)'
+        required: true
+        type: choice
+        default: 'us'
+        options:
+          - 'us'
+          - 'india'
+          - 'us_and_india'
+          - 'all'
       full_content:
         description: '📄 Fetch Full HTML Job Description (slower; uncheck for fast indexing)'
         required: true
@@ -245,6 +255,7 @@ jobs:
           KEYWORD="${{ github.event.inputs.title_keyword }}"
           CONCURRENCY="${{ github.event.inputs.concurrency || '80' }}"
           ONLY_US="${{ github.event.inputs.only_us }}"
+          TARGET_COUNTRY="${{ github.event.inputs.target_country || 'us' }}"
           FULL_CONTENT="${{ github.event.inputs.full_content }}"
           ENRICH="${{ github.event.inputs.enrich_jobs }}"
 
@@ -271,7 +282,9 @@ jobs:
             FLAGS="$FLAGS --keyword \"$KEYWORD\""
           fi
 
-          if [ "$ONLY_US" = "true" ] || [ -z "$ONLY_US" ]; then
+          if [ -n "$TARGET_COUNTRY" ]; then
+            FLAGS="$FLAGS --country $TARGET_COUNTRY"
+          elif [ "$ONLY_US" = "true" ] || [ -z "$ONLY_US" ]; then
             FLAGS="$FLAGS --only-us"
           fi
 
@@ -333,7 +346,8 @@ jobs:
         run: |
           echo "Discovered shard database files:"
           ls -lh ./shards/ || true
-          python extract_live_jobs.py --merge-dbs "./shards/*.db" --output-db live_jobs.db --export-csv live_jobs.csv
+          TARGET_COUNTRY="${{ github.event.inputs.target_country || 'us' }}"
+          python extract_live_jobs.py --merge-dbs "./shards/*.db" --output-db live_jobs.db --export-csv live_jobs.csv --country "$TARGET_COUNTRY"
 
       - name: Deep JD Enrichment Post-Processing
         if: ${{ github.event.inputs.enrich_jobs == 'true' || github.event.inputs.full_content == 'true' }}

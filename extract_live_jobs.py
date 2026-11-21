@@ -150,6 +150,58 @@ def is_us_location(loc_input: Any, extra_text: str = "") -> bool:
     return False
 
 
+INDIA_CITIES_SAMPLE = {
+    "bengaluru", "bangalore", "hyderabad", "pune", "mumbai", "delhi", "new delhi",
+    "gurgaon", "gurugram", "noida", "greater noida", "chennai", "kolkata", "ahmedabad",
+    "jaipur", "kochi", "coimbatore", "chandigarh", "indore", "surat", "vadodara",
+    "nagpur", "visakhapatnam", "vizag", "thiruvananthapuram", "trivandrum", "bhopal",
+    "patna", "lucknow", "bhubaneswar", "mysore", "mysuru", "faridabad", "ghaziabad",
+    "navi mumbai", "secunderabad", "mohali"
+}
+
+INDIA_STATES = {
+    "karnataka", "telangana", "maharashtra", "tamil nadu", "delhi", "haryana",
+    "uttar pradesh", "gujarat", "west bengal", "kerala", "rajasthan",
+    "madhya pradesh", "punjab", "andhra pradesh", "odisha", "bihar", "assam", "goa",
+    "in-ka", "in-mh", "in-ts", "in-tn", "in-dl", "in-hr", "in-up", "in-gj", "in-wb", "in-kl"
+}
+
+
+def is_india_location(loc_input: Any, extra_text: str = "") -> bool:
+    """
+    Robust heuristic to determine if a job is India-based or India-Remote.
+    Checks location string, job title, and office names.
+    """
+    if isinstance(loc_input, dict):
+        loc_str = " ".join(str(v) for v in loc_input.values() if v)
+    else:
+        loc_str = str(loc_input or "")
+
+    clean = loc_str.lower().strip()
+    combined = f"{loc_str} {extra_text}".lower().strip()
+
+    # Direct India indicators
+    if clean in ("in", "ind", "india") or clean.startswith("in-") or clean.endswith("-in"):
+        return True
+    if any(tag in combined for tag in [
+        "india", ", in", "(in)", "- in", "in -", "in, ", "/ in", "remote - india",
+        "india remote", "remote, india", "remote (india)", "anywhere in india"
+    ]):
+        return True
+
+    # Major Indian tech cities
+    for city in INDIA_CITIES_SAMPLE:
+        if re.search(r"\b" + re.escape(city) + r"\b", combined):
+            return True
+
+    # Major Indian states
+    for st in INDIA_STATES:
+        if re.search(r"\b" + re.escape(st) + r"\b", combined):
+            return True
+
+    return False
+
+
 def parse_to_iso(val: Any) -> str:
     """Standardizes various ATS timestamp formats into an ISO 8601 UTC string."""
     if not val:
@@ -2382,6 +2434,7 @@ def init_db(db_path: str):
     cur.execute("PRAGMA table_info(live_jobs);")
     existing_cols = {r[1] for r in cur.fetchall()}
     columns_to_add = [
+        ("is_india", "INTEGER DEFAULT 0"),
         ("salary", "TEXT"),
         ("salary_min", "REAL"),
         ("salary_max", "REAL"),
@@ -2419,6 +2472,7 @@ def init_db(db_path: str):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON live_jobs(company_slug);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_posted ON live_jobs(posted_at);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_us ON live_jobs(is_us);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_india ON live_jobs(is_india);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sal ON live_jobs(salary_min);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_h1b ON live_jobs(h1b_status);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_boards_status ON scanned_boards(http_status);")
@@ -2477,6 +2531,10 @@ def save_jobs_batch(db_path: str, jobs: List[Dict[str, Any]], enable_enrichment:
     prepared = []
     for j in jobs:
         enr = enrich_job_record(j, enable_enrichment=enable_enrichment)
+        if "is_india" not in enr:
+            loc = enr.get("location") or ""
+            title = enr.get("title") or ""
+            enr["is_india"] = 1 if is_india_location(loc, extra_text=title) else 0
         if not keep_content and "content" in enr:
             enr["content"] = ""
         clean = {k: sanitize_sqlite_value(v) for k, v in enr.items()}
@@ -2487,14 +2545,14 @@ def save_jobs_batch(db_path: str, jobs: List[Dict[str, Any]], enable_enrichment:
     cur.execute("PRAGMA journal_mode = WAL;")
     cur.executemany("""
         INSERT OR REPLACE INTO live_jobs (
-            job_id, platform, company_name, company_slug, title, location, is_us,
+            job_id, platform, company_name, company_slug, title, location, is_us, is_india,
             apply_url, department, office, employment_type, posted_at, updated_at,
             raw_timestamp, content, salary, salary_min, salary_max, salary_currency,
             salary_period, skills, skills_required, skills_preferred, work_mode,
             experience_min, experience_max, education, h1b_status,
             visa_sponsorship_status, sponsorship_evidence, reports_to, is_enriched, extracted_at
         ) VALUES (
-            :job_id, :platform, :company_name, :company_slug, :title, :location, :is_us,
+            :job_id, :platform, :company_name, :company_slug, :title, :location, :is_us, :is_india,
             :apply_url, :department, :office, :employment_type, :posted_at, :updated_at,
             :raw_timestamp, :content, :salary, :salary_min, :salary_max, :salary_currency,
             :salary_period, :skills, :skills_required, :skills_preferred, :work_mode,
@@ -2506,7 +2564,7 @@ def save_jobs_batch(db_path: str, jobs: List[Dict[str, Any]], enable_enrichment:
     conn.close()
 
 
-def export_sqlite_to_csv(db_path: str, csv_path: str, only_us: bool = False, include_content: bool = False):
+def export_sqlite_to_csv(db_path: str, csv_path: str, only_us: bool = False, country: str = "us", include_content: bool = False):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(live_jobs);")
@@ -2515,8 +2573,16 @@ def export_sqlite_to_csv(db_path: str, csv_path: str, only_us: bool = False, inc
         cols = [c for c in cols if c != "content"]
     col_str = ", ".join(f'"{c}"' for c in cols)
     query = f"SELECT {col_str} FROM live_jobs"
-    if only_us:
-        query += " WHERE is_us = 1"
+    where_parts = []
+    if only_us or country == "us":
+        where_parts.append("is_us = 1")
+    elif country == "india":
+        where_parts.append("is_india = 1")
+    elif country == "us_and_india":
+        where_parts.append("(is_us = 1 OR is_india = 1)")
+
+    if where_parts:
+        query += " WHERE " + " AND ".join(where_parts)
     query += " ORDER BY posted_at DESC"
     cur.execute(query)
     columns = [desc[0] for desc in cur.description]
@@ -2530,13 +2596,14 @@ def export_sqlite_to_csv(db_path: str, csv_path: str, only_us: bool = False, inc
                 break
             writer.writerows(rows)
             
-    cur.execute(f"SELECT COUNT(*) FROM live_jobs {'WHERE is_us = 1' if only_us else ''};")
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    cur.execute(f"SELECT COUNT(*) FROM live_jobs {where_sql};")
     count = cur.fetchone()[0]
     conn.close()
-    print(f"Exported {count:,} jobs to '{csv_path}' (include_content={include_content}).")
+    print(f"Exported {count:,} jobs to '{csv_path}' (country={country}, include_content={include_content}).")
 
 
-def merge_databases(input_patterns: List[str], output_db: str, export_csv: Optional[str] = None):
+def merge_databases(input_patterns: List[str], output_db: str, export_csv: Optional[str] = None, country: str = "us"):
     """Merges multiple shard SQLite databases into a unified database and optional CSV."""
     resolved_paths = []
     for pat in input_patterns:
@@ -2616,7 +2683,7 @@ def merge_databases(input_patterns: List[str], output_db: str, export_csv: Optio
     print(f"  • Total Live Jobs: {total_merged_jobs:,}")
 
     if export_csv:
-        export_sqlite_to_csv(output_db, export_csv)
+        export_sqlite_to_csv(output_db, export_csv, country=country)
 
 
 def load_companies(input_path: str, default_platform: str) -> List[Tuple[str, str]]:
@@ -2659,6 +2726,7 @@ async def run_extractor(
     concurrency: int = 80,
     full_content: bool = False,
     only_us: bool = False,
+    country: str = "us",
     days: int = 0,
     keyword: Optional[str] = None,
     batch_size: int = 100,
@@ -2758,7 +2826,14 @@ async def run_extractor(
 
                 valid_comp_jobs = []
                 for j in comp_jobs:
-                    if only_us and not j.get("is_us"):
+                    # Country location filtering
+                    is_us = bool(j.get("is_us"))
+                    is_in = bool(j.get("is_india")) or is_india_location(j.get("location", ""), extra_text=j.get("title", ""))
+                    if (only_us or country == "us") and not is_us:
+                        continue
+                    elif country == "india" and not is_in:
+                        continue
+                    elif country == "us_and_india" and not (is_us or is_in):
                         continue
                     if cutoff_dt and j.get("posted_at"):
                         try:
@@ -2825,15 +2900,24 @@ def main():
     parser.add_argument("--concurrency", type=int, default=80, help="Max async requests concurrency")
     parser.add_argument("--full-content", action="store_true", help="Download complete job descriptions")
     parser.add_argument("--enrich", action="store_true", help="Run deep JD enrichment (salary, skills, H-1B, experience)")
-    parser.add_argument("--only-us", action="store_true", help="Only save US / US-Remote jobs")
+    parser.add_argument("--only-us", action="store_true", help="Only save US / US-Remote jobs (alias for --country us)")
+    parser.add_argument("--country", default="us", choices=["us", "india", "us_and_india", "all"],
+                        help="Target country location filter: us, india, us_and_india, all")
+    parser.add_argument("--only-india", action="store_true", help="Only save India / India-Remote jobs (alias for --country india)")
     parser.add_argument("--days", type=int, default=0, help="Filter jobs posted within last N days (0 = all time)")
     parser.add_argument("--keyword", type=str, default="", help="Filter job title/department/location by keyword")
 
     args = parser.parse_args()
 
+    target_country = args.country
+    if args.only_india:
+        target_country = "india"
+    elif args.only_us:
+        target_country = "us"
+
     # Mode 0: Database merge mode
     if args.merge_dbs:
-        merge_databases(args.merge_dbs, args.output_db, export_csv=args.export_csv)
+        merge_databases(args.merge_dbs, args.output_db, export_csv=args.export_csv, country=target_country)
         return
 
     enable_enrichment = args.enrich or args.full_content
@@ -2855,7 +2939,13 @@ def main():
                 kw = args.keyword.lower().strip()
 
                 for j in jobs:
-                    if args.only_us and not j["is_us"]:
+                    is_us = bool(j.get("is_us"))
+                    is_in = bool(j.get("is_india")) or is_india_location(j.get("location", ""), extra_text=j.get("title", ""))
+                    if (args.only_us or target_country == "us") and not is_us:
+                        continue
+                    elif target_country == "india" and not is_in:
+                        continue
+                    elif target_country == "us_and_india" and not (is_us or is_in):
                         continue
                     if cutoff_dt and j.get("posted_at"):
                         try:
@@ -2883,7 +2973,7 @@ def main():
                     print(f"Saved to {args.output_db}")
 
                 if args.export_csv:
-                    export_sqlite_to_csv(args.output_db, args.export_csv, only_us=args.only_us)
+                    export_sqlite_to_csv(args.output_db, args.export_csv, only_us=args.only_us, country=target_country)
 
         asyncio.run(run_single())
         return
@@ -2944,6 +3034,7 @@ def main():
             concurrency=args.concurrency,
             full_content=args.full_content,
             only_us=args.only_us,
+            country=target_country,
             days=args.days,
             keyword=args.keyword,
             enable_enrichment=enable_enrichment,
