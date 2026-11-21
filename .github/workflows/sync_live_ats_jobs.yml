@@ -1,10 +1,10 @@
-name: Harvest Live ATS Jobs
+name: Enterprise ATS Live Postings Sync
 
 on:
   workflow_dispatch:
     inputs:
       platform:
-        description: '🎯 ATS Platform to harvest'
+        description: '🎯 ATS Platform to synchronize'
         required: true
         type: choice
         default: 'all'
@@ -143,29 +143,29 @@ on:
         default: false
 
       sync_to_neon:
-        description: 'Publish harvested jobs to the Getworkin Neon catalog'
+        description: 'Publish verified postings to the Neon catalog'
         required: false
         type: boolean
         default: false
 
-  # Optional daily automated job harvest at 06:00 UTC
+  # Optional daily automated sync at 06:00 UTC
   schedule:
     - cron: '0 6 * * *'
 
 permissions:
   contents: write
 
-# Prevent two harvests from pruning/upserting the catalog simultaneously.
+# Prevent concurrent catalog pruning/upserting
 concurrency:
-  group: harvest-live-ats-jobs
+  group: sync-live-ats-jobs
   cancel-in-progress: false
 
 jobs:
   # ============================================================================
-  # JOB 1: Dynamic Matrix Planner for Parallel Sharded Runners
+  # JOB 1: Dynamic Matrix Planner for Parallel Runners
   # ============================================================================
   setup-shards:
-    name: "⚙️ Plan Runner Shards"
+    name: "⚙️ Plan Runner Nodes"
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
@@ -204,16 +204,16 @@ jobs:
           '
 
   # ============================================================================
-  # JOB 2: Parallel Sharded Live Job Harvesters
+  # JOB 2: Parallel Sharded Live Data Synchronizers
   # ============================================================================
-  harvest-shard:
-    name: "🚜 Harvest Shard ${{ matrix.num }} of ${{ matrix.total }}"
+  sync-worker:
+    name: "Sync Node ${{ matrix.num }} of ${{ matrix.total }}"
     needs: setup-shards
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 24
+      max-parallel: 8
       matrix: ${{ fromJson(needs.setup-shards.outputs.matrix) }}
     env:
       PYTHONUNBUFFERED: "1"
@@ -300,7 +300,7 @@ jobs:
   # ============================================================================
   merge-and-export:
     name: "📦 Merge Shards & Export Final Datasets"
-    needs: [setup-shards, harvest-shard]
+    needs: [setup-shards, sync-worker]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -340,7 +340,7 @@ jobs:
           echo "Running Deep JD Enrichment on merged database..."
           python enrich_jobs.py --db live_jobs.db --export-csv live_jobs.csv
 
-      - name: Sync Harvest to Neon Job Catalog
+      - name: Sync Postings to Neon Job Catalog
         if: ${{ github.event.inputs.sync_to_neon == 'true' }}
         env:
           JOB_CATALOG_DATABASE_URL: ${{ secrets.JOB_CATALOG_DATABASE_URL }}
@@ -349,7 +349,7 @@ jobs:
             echo "JOB_CATALOG_DATABASE_URL secret is not configured; skipping Neon sync."
             exit 0
           fi
-          python sync_harvest_to_neon.py \
+          python sync_to_neon.py \
             --db live_jobs.db \
             --retention-days 30 \
             --max-catalog-rows 450000
@@ -443,7 +443,7 @@ jobs:
               summary.append(f"- **Total Company Boards Scanned:** `{total_boards:,}`")
               summary.append(f"- **Boards Returning HTTP 200 (Active):** `{boards_200:,}` / `{total_boards:,}` (**{board_200_rate:.1f}%**)")
               summary.append(f"- **Boards with Live Openings:** `{boards_with_jobs:,}`")
-          summary.append(f"- **Total Live Jobs Harvested:** `{total_jobs:,}`")
+          summary.append(f"- **Total Live Postings Synchronized:** `{total_jobs:,}`")
           summary.append(f"- **Timestamp Capture Rate:** `{with_ts:,}` / `{total_jobs:,}` (**{ts_rate:.1f}%**)")
           if jobs_with_sal > 0 or jobs_with_skills > 0:
               summary.append(f"- **Compensation Ranges Identified:** `{jobs_with_sal:,}` / `{total_jobs:,}`")
@@ -483,11 +483,11 @@ jobs:
       - name: Package Datasets into Zip Archive
         if: always()
         run: |
-          echo "Packaging harvested dataset into zip archive..."
+          echo "Packaging dataset into zip archive..."
           zip -9 live_jobs_dataset.zip live_jobs.db live_jobs.csv* 2>/dev/null || true
           ls -lh live_jobs_dataset.zip || true
 
-      - name: Upload Harvested Datasets as Artifacts
+      - name: Upload Processed Datasets as Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -524,6 +524,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Automated: update live_jobs dataset from multi-shard harvest [skip ci]"
+            git commit -m "Automated: update live postings telemetry dataset [skip ci]"
             git push origin main || git push --force-with-lease origin main
           fi

@@ -1,4 +1,4 @@
-name: Enrich Harvested Jobs with Deep JD Intelligence
+name: Enrich Posting Telemetry with Skill Intelligence
 
 on:
   workflow_dispatch:
@@ -96,7 +96,7 @@ jobs:
           conn.close()
 
           summary = []
-          summary.append("## 🧠 Post-Harvest Deep JD Enrichment Summary\n")
+          summary.append("## 🧠 Telemetry Skill Enrichment Summary\n")
           summary.append(f"- **Total Live Jobs Enriched:** `{total_jobs:,}`")
           summary.append(f"- **Compensation Ranges Identified:** `{jobs_with_sal:,}` / `{total_jobs:,}`")
           summary.append(f"- **Skills Extracted:** `{jobs_with_skills:,}` / `{total_jobs:,}`")

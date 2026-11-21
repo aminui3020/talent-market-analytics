@@ -1,4 +1,4 @@
-name: Talent Market Telemetry (AI & Automation Roles)
+name: Talent Market Telemetry (Supply Chain & Operations Roles)
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ on:
         type: string
         default: "India"
       country:
-        description: "Country code"
+        description: "Indeed country code"
         required: false
         type: string
         default: "india"
@@ -43,14 +43,14 @@ permissions:
   contents: read
 
 jobs:
-  scrape-shard:
-    name: "Telemetry Worker ${{ matrix.shard }}/3"
+  telemetry-worker:
+    name: "Shard ${{ matrix.shard }}/8"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - name: Checkout Repository
@@ -72,38 +72,31 @@ jobs:
           RESIDENTIAL_PROXY: ${{ secrets.RESIDENTIAL_PROXY }}
           PROXY_URL: ${{ secrets.RESIDENTIAL_PROXY }}
         run: |
-          SPLIT_FLAG=""
-          if [ "${{ github.event.inputs.auto_split }}" = "false" ] || [ -z "${{ github.event.inputs.auto_split }}" ]; then
-            SPLIT_FLAG="--no-state-split"
-          fi
           PROXY_ARG=""
           if [ -n "${{ secrets.RESIDENTIAL_PROXY }}" ]; then
             PROXY_ARG="--proxy ${{ secrets.RESIDENTIAL_PROXY }}"
           fi
           python3 tools/run_sharded_roles.py \
-            --role-set ai_automation \
+            --role-set supply_chain \
             --platform "${{ github.event.inputs.platform || 'both' }}" \
             --shard ${{ matrix.shard }} \
-            --total-shards 3 \
+            --total-shards 8 \
             --post-time "${{ github.event.inputs.post_time || '2weeks' }}" \
-            --location "${{ github.event.inputs.location || 'India' }}" \
-            --country "${{ github.event.inputs.country || 'india' }}" \
-            $SPLIT_FLAG \
             $PROXY_ARG
 
-      - name: Upload Telemetry Output Artifact
+      - name: Upload Shard Output Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "ai-shard-output-${{ matrix.shard }}"
+          name: "shard-output-${{ matrix.shard }}"
           path: |
             **/*.csv
             **/*.json
           retention-days: 1
 
   merge-and-package:
-    name: "Aggregate Metrics & Build Deliverable"
-    needs: scrape-shard
+    name: "Merge Shards & Create Zip"
+    needs: telemetry-worker
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -125,7 +118,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./shards
-          pattern: "ai-shard-output-*"
+          pattern: "shard-output-*"
           merge-multiple: true
 
       - name: Merge, Deduplicate & Build Excel
@@ -149,30 +142,31 @@ jobs:
 
           if dfs:
               merged = pd.concat(dfs, ignore_index=True)
+              # Deduplicate by job URL or title+company
               dedup_col = "job_url" if "job_url" in merged.columns else ("id" if "id" in merged.columns else None)
               if dedup_col:
                   merged = merged.drop_duplicates(subset=[dedup_col])
               else:
                   merged = merged.drop_duplicates()
 
-              print(f"Merged total unique AI jobs: {len(merged)}")
-              merged.to_csv("deliverables/ai_automation_jobs_all.csv", index=False)
-
-              with pd.ExcelWriter("deliverables/ai_automation_jobs.xlsx", engine="openpyxl") as writer:
-                  merged.to_excel(writer, sheet_name="AI Jobs", index=False)
+              print(f"Merged total unique jobs: {len(merged)}")
+              merged.to_csv("deliverables/supply_chain_jobs_all.csv", index=False)
+              
+              with pd.ExcelWriter("deliverables/supply_chain_jobs.xlsx", engine="openpyxl") as writer:
+                  merged.to_excel(writer, sheet_name="All Jobs", index=False)
           else:
               print("No CSV records found.")
-              pd.DataFrame().to_csv("deliverables/ai_automation_jobs_all.csv", index=False)
+              pd.DataFrame().to_csv("deliverables/supply_chain_jobs_all.csv", index=False)
           '
 
       - name: Package Deliverables into Zip Archive
         run: |
-          zip -9 ai_automation_jobs_dataset.zip deliverables/* || true
-          ls -lh ai_automation_jobs_dataset.zip || true
+          zip -9 supply_chain_jobs_dataset.zip deliverables/* || true
+          ls -lh supply_chain_jobs_dataset.zip || true
 
       - name: Upload Final Deliverable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: "ai-automation-jobs-dataset"
-          path: ai_automation_jobs_dataset.zip
+          name: "supply-chain-jobs-dataset"
+          path: supply_chain_jobs_dataset.zip
           retention-days: 14
