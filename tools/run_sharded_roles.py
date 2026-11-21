@@ -235,6 +235,8 @@ def main():
                         help="Indeed country code (default: india)")
     parser.add_argument("--no-state-split", "--no-split", action="store_true",
                         help="Disable auto state splitting")
+    parser.add_argument("--proxy", default=None,
+                        help="HTTP/HTTPS proxy URL (or set PROXY_URL / RESIDENTIAL_PROXY env var)")
     parser.add_argument("--list-shards", action="store_true",
                         help="Display shard breakdown without running")
 
@@ -262,6 +264,10 @@ def main():
         extra_args += ["--location", args.location]
     if args.no_state_split:
         extra_args += ["--no-state-split"]
+    proxy_val = args.proxy or os.getenv("RESIDENTIAL_PROXY") or os.getenv("PROXY_URL")
+    if proxy_val:
+        os.environ["PROXY_URL"] = proxy_val
+        extra_args += ["--proxy", proxy_val]
     extra_args += unknown
 
     if args.platform in ("linkedin", "both"):

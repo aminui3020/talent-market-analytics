@@ -1,10 +1,10 @@
-name: Supply Chain 79 Roles Harvester (8-Shard Safe Edition)
+name: Talent Market Telemetry (Supply Chain & Operations Roles)
 
 on:
   workflow_dispatch:
     inputs:
       platform:
-        description: "Platform to scrape"
+        description: "Platform data connector"
         required: true
         type: choice
         default: "both"
@@ -67,13 +67,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install httpx beautifulsoup4 python-jobspy pandas python-dotenv curl_cffi openpyxl
 
-      - name: Execute Shard Roles
+      - name: Execute Telemetry Pipeline
+        env:
+          RESIDENTIAL_PROXY: ${{ secrets.RESIDENTIAL_PROXY }}
+          PROXY_URL: ${{ secrets.RESIDENTIAL_PROXY }}
         run: |
+          PROXY_ARG=""
+          if [ -n "${{ secrets.RESIDENTIAL_PROXY }}" ]; then
+            PROXY_ARG="--proxy ${{ secrets.RESIDENTIAL_PROXY }}"
+          fi
           python3 tools/run_sharded_roles.py \
+            --role-set supply_chain \
             --platform "${{ github.event.inputs.platform || 'both' }}" \
             --shard ${{ matrix.shard }} \
             --total-shards 8 \
-            --post-time "${{ github.event.inputs.post_time || 'week' }}"
+            --post-time "${{ github.event.inputs.post_time || '2weeks' }}" \
+            $PROXY_ARG
 
       - name: Upload Shard Output Artifact
         if: always()

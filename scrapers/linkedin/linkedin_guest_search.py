@@ -11,6 +11,7 @@ taking a short batch for the end of the results.
 """
 from __future__ import annotations
 
+import os
 import html
 import random
 import re
@@ -56,7 +57,14 @@ _client: httpx.Client | None = None
 def _http() -> httpx.Client:
     global _client
     if _client is None:
-        _client = httpx.Client(headers=HEADERS, timeout=25, follow_redirects=True)
+        proxy = (
+            os.getenv("PROXY_URL")
+            or os.getenv("RESIDENTIAL_PROXY")
+            or os.getenv("HTTPS_PROXY")
+            or os.getenv("HTTP_PROXY")
+            or None
+        )
+        _client = httpx.Client(headers=HEADERS, timeout=25, follow_redirects=True, proxy=proxy)
     return _client
 
 

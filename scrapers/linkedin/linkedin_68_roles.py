@@ -709,10 +709,18 @@ def _fetch_one_job_details(url: str) -> dict[str, Any]:
         # Authenticated fetch: applyUrl (external ATS link) is only present when logged in
         li_at = os.getenv("LINKEDIN_LI_AT", "")
         cookies = {"li_at": li_at} if li_at else {}
+        proxy = (
+            os.getenv("PROXY_URL")
+            or os.getenv("RESIDENTIAL_PROXY")
+            or os.getenv("HTTPS_PROXY")
+            or os.getenv("HTTP_PROXY")
+            or None
+        )
+        proxies = {"all": proxy} if proxy else None
         for attempt in range(DESC_RETRIES + 1):
             try:
                 from curl_cffi import requests as _cffi
-                response = _cffi.get(url, headers=headers, cookies=cookies,
+                response = _cffi.get(url, headers=headers, cookies=cookies, proxies=proxies,
                                      timeout=DESC_TIMEOUT, allow_redirects=True, impersonate="chrome")
                 if response.status_code == 200 and "/signup" not in str(response.url):
                     return _parse_linkedin_detail_html(response.text)
@@ -1110,6 +1118,12 @@ def main() -> None:
         "--no-state-split", "--no-split",
         action="store_true",
         help="Disable state-by-state splitting",
+    )
+    parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        help="HTTP/HTTPS proxy URL for requests (e.g. http://user:pass@host:port)",
     )
     parser.add_argument(
         "--resume",

@@ -1,10 +1,10 @@
-name: AI & Automation 15 Roles Harvester (3-Shard Safe Edition)
+name: Talent Market Telemetry (AI & Automation Roles)
 
 on:
   workflow_dispatch:
     inputs:
       platform:
-        description: "Platform to scrape"
+        description: "Platform data connector"
         required: true
         type: choice
         default: "both"
@@ -18,7 +18,7 @@ on:
         type: string
         default: "India"
       country:
-        description: "Indeed country code"
+        description: "Country code"
         required: false
         type: string
         default: "india"
@@ -44,7 +44,7 @@ permissions:
 
 jobs:
   scrape-shard:
-    name: "AI Shard ${{ matrix.shard }}/3"
+    name: "Telemetry Worker ${{ matrix.shard }}/3"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -67,11 +67,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install httpx beautifulsoup4 python-jobspy pandas python-dotenv curl_cffi openpyxl
 
-      - name: Execute AI Shard Roles
+      - name: Execute Telemetry Pipeline
+        env:
+          RESIDENTIAL_PROXY: ${{ secrets.RESIDENTIAL_PROXY }}
+          PROXY_URL: ${{ secrets.RESIDENTIAL_PROXY }}
         run: |
           SPLIT_FLAG=""
           if [ "${{ github.event.inputs.auto_split }}" = "false" ] || [ -z "${{ github.event.inputs.auto_split }}" ]; then
             SPLIT_FLAG="--no-state-split"
+          fi
+          PROXY_ARG=""
+          if [ -n "${{ secrets.RESIDENTIAL_PROXY }}" ]; then
+            PROXY_ARG="--proxy ${{ secrets.RESIDENTIAL_PROXY }}"
           fi
           python3 tools/run_sharded_roles.py \
             --role-set ai_automation \
@@ -81,9 +88,10 @@ jobs:
             --post-time "${{ github.event.inputs.post_time || '2weeks' }}" \
             --location "${{ github.event.inputs.location || 'India' }}" \
             --country "${{ github.event.inputs.country || 'india' }}" \
-            $SPLIT_FLAG
+            $SPLIT_FLAG \
+            $PROXY_ARG
 
-      - name: Upload Shard Output Artifact
+      - name: Upload Telemetry Output Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -94,7 +102,7 @@ jobs:
           retention-days: 1
 
   merge-and-package:
-    name: "Merge AI Shards & Create Zip"
+    name: "Aggregate Metrics & Build Deliverable"
     needs: scrape-shard
     if: always()
     runs-on: ubuntu-latest

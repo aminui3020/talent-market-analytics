@@ -1,10 +1,17 @@
-# Extracting ATS Companies from Common Crawl (Powered by whirlwind-python)
+# Talent Market Analytics & Labor Intelligence Pipeline
 
-This project uses techniques from [Common Crawl's `whirlwind-python`](https://github.com/commoncrawl/whirlwind-python) repository to extract companies that post jobs on major Applicant Tracking System (ATS) platforms.
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Data Pipeline](https://img.shields.io/badge/pipeline-active-brightgreen.svg)](#architecture)
+[![Dataset](https://img.shields.io/badge/taxonomy-110k%2B%20employers-orange.svg)](#ats-platforms-supported)
+
+An open-source labor market intelligence, taxonomy normalization, and talent telemetry pipeline. This repository aggregates structured employer metadata from web crawls and public enterprise hiring feeds, providing normalized workforce demand indicators for labor economics research.
 
 ---
 
 ## 1. How It Works
+
+This project uses techniques from [Common Crawl's `whirlwind-python`](https://github.com/commoncrawl/whirlwind-python) repository to extract companies that post jobs on major Applicant Tracking System (ATS) platforms.
 
 Common Crawl crawls billions of web pages every month and indexes them into:
 1. **Columnar Parquet Index (`ccindex`)**: Stores structured metadata (`url`, `url_host_registered_domain`, `url_host_tld`, `warc_filename`, `warc_record_offset`, `warc_record_length`).
