@@ -211,7 +211,7 @@ class AsyncHTTPClient:
         concurrency: int = 80,
         per_host_concurrency: int = 15,
         min_host_interval: float = 0.03,  # Up to 33 req/sec per host
-        timeout: float = 8.0,
+        timeout: float = 12.0,
     ):
         self.semaphore = asyncio.Semaphore(concurrency)
         self.per_host_concurrency = per_host_concurrency
@@ -296,10 +296,14 @@ class AsyncHTTPClient:
         if self._session:
             await self._session.close()
 
-    async def get_json(self, url: str, max_retries: int = 2) -> Tuple[int, Any]:
+    async def get_json(self, url: str, headers: Optional[Dict[str, str]] = None, max_retries: int = 2) -> Tuple[int, Any]:
         """Performs async GET and parses JSON with host-wide circuit breaker and exponential jitter on 429/503."""
         host = self._get_host(url)
         host_sem = self._get_host_sem(host)
+
+        req_headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        if headers:
+            req_headers.update(headers)
 
         for attempt in range(max_retries + 1):
             async with self.semaphore:
@@ -309,10 +313,7 @@ class AsyncHTTPClient:
                     if not HAS_AIOHTTP or not self._session:
                         import urllib.request
                         try:
-                            req = urllib.request.Request(
-                                url,
-                                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-                            )
+                            req = urllib.request.Request(url, headers=req_headers)
                             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                                 status = resp.status
                                 data = json.loads(resp.read().decode("utf-8", errors="ignore"))
@@ -330,7 +331,7 @@ class AsyncHTTPClient:
                             return 0, None
 
                     try:
-                        async with self._session.get(url) as resp:
+                        async with self._session.get(url, headers=headers) as resp:
                             if resp.status == 200:
                                 try:
                                     data = await resp.json(content_type=None)
@@ -354,10 +355,14 @@ class AsyncHTTPClient:
                         return 0, None
         return 0, None
 
-    async def get_text(self, url: str, max_retries: int = 2) -> Tuple[int, Optional[str]]:
+    async def get_text(self, url: str, headers: Optional[Dict[str, str]] = None, max_retries: int = 2) -> Tuple[int, Optional[str]]:
         """Performs async GET and returns raw text / HTML with host pacing and circuit breaker."""
         host = self._get_host(url)
         host_sem = self._get_host_sem(host)
+
+        req_headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        if headers:
+            req_headers.update(headers)
 
         for attempt in range(max_retries + 1):
             async with self.semaphore:
@@ -367,10 +372,7 @@ class AsyncHTTPClient:
                     if not HAS_AIOHTTP or not self._session:
                         import urllib.request
                         try:
-                            req = urllib.request.Request(
-                                url,
-                                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-                            )
+                            req = urllib.request.Request(url, headers=req_headers)
                             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                                 return resp.status, resp.read().decode("utf-8", errors="ignore")
                         except urllib.error.HTTPError as e:
@@ -386,7 +388,7 @@ class AsyncHTTPClient:
                             return 0, None
 
                     try:
-                        async with self._session.get(url) as resp:
+                        async with self._session.get(url, headers=headers) as resp:
                             if resp.status == 200:
                                 text = await resp.text()
                                 return 200, text
@@ -405,10 +407,17 @@ class AsyncHTTPClient:
                         return 0, None
         return 0, None
 
-    async def post_json(self, url: str, json_data: Any, max_retries: int = 2) -> Tuple[int, Any]:
+    async def post_json(self, url: str, json_data: Any, headers: Optional[Dict[str, str]] = None, max_retries: int = 2) -> Tuple[int, Any]:
         """Performs async POST and parses JSON with host pacing and circuit breaker."""
         host = self._get_host(url)
         host_sem = self._get_host_sem(host)
+
+        req_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }
+        if headers:
+            req_headers.update(headers)
 
         for attempt in range(max_retries + 1):
             async with self.semaphore:
@@ -422,10 +431,7 @@ class AsyncHTTPClient:
                             req = urllib.request.Request(
                                 url,
                                 data=payload,
-                                headers={
-                                    "Content-Type": "application/json",
-                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                                },
+                                headers=req_headers,
                             )
                             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                                 return resp.status, json.loads(resp.read().decode("utf-8", errors="ignore"))
@@ -442,7 +448,7 @@ class AsyncHTTPClient:
                             return 0, None
 
                     try:
-                        async with self._session.post(url, json=json_data) as resp:
+                        async with self._session.post(url, json=json_data, headers=headers) as resp:
                             if resp.status == 200:
                                 try:
                                     data = await resp.json(content_type=None)
@@ -977,35 +983,53 @@ async def extract_gem(http: AsyncHTTPClient, slug: str, full_content: bool) -> T
 
 
 async def extract_dover(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
-    url = f"https://app.dover.com/api/v1/careers-page/{slug}/jobs"
+    cid = slug
+    url = f"https://app.dover.com/api/v1/careers-page/{cid}/jobs?limit=100&offset=0"
     status, data = await http.get_json(url)
+    if status != 200 or not isinstance(data, dict):
+        res_st, res_data = await http.get_json(f"https://app.dover.com/api/v1/careers-page-slug/{slug}")
+        if res_st == 200 and isinstance(res_data, dict) and res_data.get("id"):
+            cid = res_data["id"]
+            status, data = await http.get_json(f"https://app.dover.com/api/v1/careers-page/{cid}/jobs?limit=100&offset=0")
+
     extracted = []
     now_iso = datetime.now(timezone.utc).isoformat()
     company_name = slug.replace("-", " ").title()
     if status == 200 and isinstance(data, dict):
-        jobs = data.get("jobs") or []
+        jobs = data.get("results") or data.get("jobs") or []
         for j in jobs:
-            loc = format_location_string(j.get("location"), is_remote=bool(j.get("remote")))
-            created = j.get("created_at") or ""
+            loc_list = j.get("locations") or []
+            loc_str = ""
+            if loc_list and isinstance(loc_list, list):
+                first_loc = loc_list[0] if isinstance(loc_list[0], dict) else {}
+                opt = first_loc.get("location_option") or {} if isinstance(first_loc.get("location_option"), dict) else {}
+                loc_str = opt.get("display_name") or f"{opt.get('city', '')}, {opt.get('state', '')}".strip(", ")
+            if not loc_str:
+                loc_str = format_location_string(j.get("location"))
+            is_rem = j.get("workplace_type") == "REMOTE" or bool(j.get("remote")) or "remote" in loc_str.lower()
+            created = j.get("created_at") or j.get("date_posted") or ""
+            jid = str(j.get("id") or hash(j.get("title", "")))
             extracted.append({
-                "job_id": f"dover_{slug}_{j.get('id')}",
+                "job_id": f"dover_{slug}_{jid}",
                 "platform": "dover",
                 "company_name": company_name,
                 "company_slug": slug,
                 "title": (j.get("title") or "").strip(),
-                "location": loc,
-                "is_us": 1 if (j.get("remote") or is_us_location(loc, extra_text=j.get("title", ""))) else 0,
-                "apply_url": f"https://app.dover.com/apply/{slug}/{j.get('id')}",
+                "location": loc_str,
+                "is_us": 1 if (is_rem or is_us_location(loc_str, extra_text=j.get("title", ""))) else 0,
+                "apply_url": f"https://app.dover.com/apply/{slug}/{jid}",
                 "department": j.get("department") or "",
-                "office": "Remote" if j.get("remote") else "",
-                "employment_type": j.get("type") or "",
+                "office": "Remote" if is_rem else "",
+                "employment_type": j.get("type") or j.get("employment_type") or "",
                 "posted_at": parse_to_iso(created),
                 "updated_at": "",
                 "raw_timestamp": str(created),
                 "content": clean_html(j.get("description", "")) if full_content else "",
                 "extracted_at": now_iso,
             })
-        return 200, extracted
+        if extracted:
+            return 200, extracted
+
     url_html = f"https://app.dover.com/apply/{slug}"
     st, html = await http.get_text(url_html)
     if st == 200 and html:
@@ -1139,11 +1163,61 @@ async def extract_jazzhr(http: AsyncHTTPClient, slug: str, full_content: bool) -
 
 
 async def extract_trakstar(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    company_name = slug.replace("-", " ").title()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    extracted = []
+
+    # 1. Native RSS Feed (100% full board coverage with location & description)
+    url_feed = f"https://{slug}.hire.trakstar.com/jobfeeds/{slug}"
+    st, xml_text = await http.get_text(url_feed)
+    if st == 200 and xml_text and "<item>" in xml_text:
+        items = re.findall(r'<item>(.*?)</item>', xml_text, re.DOTALL)
+        for it in items:
+            t_m = re.search(r'<title>(.*?)</title>', it)
+            l_m = re.search(r'<link>(.*?)</link>', it)
+            d_m = re.search(r'<pubDate>(.*?)</pubDate>', it)
+            desc_m = re.search(r'<description>(.*?)</description>', it, re.DOTALL)
+            c_m = re.search(r'<[^>]*locationCity>(.*?)</[^>]*locationCity>', it)
+            s_m = re.search(r'<[^>]*locationState>(.*?)</[^>]*locationState>', it)
+            co_m = re.search(r'<[^>]*locationCountry>(.*?)</[^>]*locationCountry>', it)
+
+            title = t_m.group(1).strip() if t_m else ""
+            link = l_m.group(1).strip() if l_m else ""
+            pub_d = d_m.group(1).strip() if d_m else ""
+            desc = desc_m.group(1).strip() if desc_m else ""
+            city = c_m.group(1).strip() if c_m else ""
+            state = s_m.group(1).strip() if s_m else ""
+            country = co_m.group(1).strip() if co_m else ""
+
+            loc = f"{city}, {state}".strip(", ")
+            if not loc:
+                loc = country
+            jid = link.rstrip("/").split("/")[-1] if link else str(hash(title))
+            is_rem = "remote" in city.lower() or "remote" in title.lower() or is_us_location(loc, extra_text=title)
+            extracted.append({
+                "job_id": f"trakstar_{slug}_{jid}",
+                "platform": "trakstar",
+                "company_name": company_name,
+                "company_slug": slug,
+                "title": title,
+                "location": loc,
+                "is_us": 1 if is_rem else 0,
+                "apply_url": link or f"https://{slug}.hire.trakstar.com/jobs/{jid}/",
+                "department": "",
+                "office": "Remote" if "remote" in city.lower() else "",
+                "employment_type": "",
+                "posted_at": parse_to_iso(pub_d),
+                "updated_at": "",
+                "raw_timestamp": pub_d,
+                "content": clean_html(desc) if full_content else "",
+                "extracted_at": now_iso,
+            })
+        if extracted:
+            return 200, extracted
+
+    # 2. Recruiterbox API fallback
     url_api = f"https://js.recruiterbox.com/v1/openings?client_name={slug}"
     status, data = await http.get_json(url_api)
-    extracted = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-    company_name = slug.replace("-", " ").title()
     if status == 200 and isinstance(data, dict):
         openings = data.get("objects") or []
         for o in openings:
@@ -1173,6 +1247,8 @@ async def extract_trakstar(http: AsyncHTTPClient, slug: str, full_content: bool)
             })
         if extracted:
             return 200, extracted
+
+    # 3. HTML parsing fallback
     url_html = f"https://{slug}.hire.trakstar.com"
     st, html = await http.get_text(url_html)
     if st == 200 and html:
@@ -1202,7 +1278,7 @@ async def extract_trakstar(http: AsyncHTTPClient, slug: str, full_content: bool)
                 "extracted_at": now_iso,
             })
         return 200, extracted
-    return status, []
+    return status if status else st, []
 
 
 async def extract_fountain(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
@@ -1393,113 +1469,189 @@ async def extract_taleo(http: AsyncHTTPClient, slug: str, full_content: bool) ->
 
 
 async def extract_paycom(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
-    url = f"https://www.paycomonline.net/v4/ats/web.php/jobs?clientkey={slug}"
-    status, html = await http.get_text(url)
-    if status != 200 or not html:
-        return status, []
     company_name = slug[:8].title()
-    extracted = []
     now_iso = datetime.now(timezone.utc).isoformat()
-    ld_jobs = extract_jsonld_job_postings(html)
-    if ld_jobs:
-        for j in ld_jobs:
-            title = j.get("title", "").strip()
-            loc_obj = j.get("jobLocation", {}).get("address", {}) if isinstance(j.get("jobLocation"), dict) else {}
-            loc = f"{loc_obj.get('addressLocality', '')}, {loc_obj.get('addressRegion', '')}".strip(", ")
-            u = j.get("url") or ""
-            jid = u.split("jobs/")[1].split("?")[0] if "jobs/" in u else str(hash(title))
-            date_p = j.get("datePosted") or ""
+    extracted = []
+
+    # 1. SSR Portal shell embedding session JWT & regional Mantle host
+    url_portal = f"https://www.paycomonline.net/v4/ats/web.php/portal/{slug}/jobs/1"
+    st, html = await http.get_text(url_portal)
+    if st == 200 and html and "Job board does not exist" not in html:
+        jwt_m = re.search(r'"sessionJWT":"([^"]+)"', html)
+        host_m = re.search(r'portal-applicant-tracking\.[a-z0-9-]+\.paycomonline\.net', html)
+        if jwt_m and host_m:
+            jwt = jwt_m.group(1)
+            host = "https://" + host_m.group(0)
+            search_url = f"{host}/api/ats/job-posting-previews/search"
+            auth_hdrs = {"Authorization": jwt, "Locale": "en-US", "Content-Type": "application/json"}
+            search_body = {
+                "skip": 0,
+                "take": 50,
+                "filtersForQuery": {
+                    "distanceFrom": 0,
+                    "workEnvironments": [],
+                    "positionTypes": [],
+                    "educationLevels": [],
+                    "categories": [],
+                    "travelTypes": [],
+                    "shiftTypes": [],
+                    "otherFilters": [],
+                    "keywordSearchText": "",
+                    "location": "",
+                    "sortOption": ""
+                }
+            }
+            p_st, p_data = await http.post_json(search_url, search_body, headers=auth_hdrs)
+            if p_st == 200 and isinstance(p_data, dict):
+                previews = p_data.get("jobPostingPreviews") or []
+                for p in previews:
+                    jid = str(p.get("jobId") or "")
+                    title = (p.get("jobTitle") or "").strip()
+                    loc = (p.get("location") or "").strip()
+                    rem_type = (p.get("remoteType") or "").strip()
+                    is_rem = rem_type.lower() == "remote" or is_us_location(loc, extra_text=title)
+                    created = p.get("startDate") or ""
+                    extracted.append({
+                        "job_id": f"paycom_{slug}_{jid}",
+                        "platform": "paycom",
+                        "company_name": company_name,
+                        "company_slug": slug,
+                        "title": title,
+                        "location": loc,
+                        "is_us": 1 if is_rem else 0,
+                        "apply_url": f"https://www.paycomonline.net/v4/ats/web.php/portal/{slug}/jobs/{jid}",
+                        "department": p.get("department") or "",
+                        "office": "Remote" if rem_type.lower() == "remote" else "",
+                        "employment_type": p.get("positionType") or "",
+                        "posted_at": parse_to_iso(created),
+                        "updated_at": "",
+                        "raw_timestamp": str(created),
+                        "content": clean_html(p.get("description", "")) if full_content else "",
+                        "extracted_at": now_iso,
+                    })
+                if extracted:
+                    return 200, extracted
+
+    # 2. Legacy / fallback URL
+    url_leg = f"https://www.paycomonline.net/v4/ats/web.php/jobs?clientkey={slug}"
+    status, html_leg = await http.get_text(url_leg)
+    if status == 200 and html_leg:
+        ld_jobs = extract_jsonld_job_postings(html_leg)
+        if ld_jobs:
+            for j in ld_jobs:
+                title = j.get("title", "").strip()
+                loc_obj = j.get("jobLocation", {}).get("address", {}) if isinstance(j.get("jobLocation"), dict) else {}
+                loc = f"{loc_obj.get('addressLocality', '')}, {loc_obj.get('addressRegion', '')}".strip(", ")
+                u = j.get("url") or ""
+                jid = u.split("jobs/")[1].split("?")[0] if "jobs/" in u else str(hash(title))
+                date_p = j.get("datePosted") or ""
+                extracted.append({
+                    "job_id": f"paycom_{slug}_{jid}",
+                    "platform": "paycom",
+                    "company_name": company_name,
+                    "company_slug": slug,
+                    "title": title,
+                    "location": loc,
+                    "is_us": 1 if is_us_location(loc, extra_text=title) else 0,
+                    "apply_url": u if u.startswith("http") else f"https://www.paycomonline.net{u}",
+                    "department": "",
+                    "office": "",
+                    "employment_type": j.get("employmentType") or "",
+                    "posted_at": parse_to_iso(date_p),
+                    "updated_at": "",
+                    "raw_timestamp": str(date_p),
+                    "content": clean_html(j.get("description", "")) if full_content else "",
+                    "extracted_at": now_iso,
+                })
+            if extracted:
+                return 200, extracted
+        matches = re.findall(
+            r'<a[^>]*href=[\"\']([^\"\']*jobs/(\d+)[^\"\']*)[\"\'][^>]*>.*?<span[^>]*class=[\"\'][^\"\']*title[^\"]*[\"\']>([^<]+)</span>(?:.*?<span[^>]*class=[\"\'][^\"\']*location[^\"]*[\"\']>([^<]+))?',
+            html_leg, re.DOTALL | re.I
+        )
+        seen = set()
+        for path, jid, title, loc in matches:
+            if jid in seen:
+                continue
+            seen.add(jid)
+            loc_str = (loc or "").strip()
+            t_clean = title.strip()
+            apply_u = path if path.startswith("http") else f"https://www.paycomonline.net{path}"
             extracted.append({
                 "job_id": f"paycom_{slug}_{jid}",
                 "platform": "paycom",
                 "company_name": company_name,
                 "company_slug": slug,
-                "title": title,
-                "location": loc,
-                "is_us": 1 if is_us_location(loc, extra_text=title) else 0,
-                "apply_url": u if u.startswith("http") else f"https://www.paycomonline.net{u}",
+                "title": t_clean,
+                "location": loc_str,
+                "is_us": 1 if is_us_location(loc_str, extra_text=t_clean) else 0,
+                "apply_url": apply_u,
                 "department": "",
                 "office": "",
-                "employment_type": j.get("employmentType") or "",
-                "posted_at": parse_to_iso(date_p),
+                "employment_type": "",
+                "posted_at": "",
                 "updated_at": "",
-                "raw_timestamp": str(date_p),
-                "content": clean_html(j.get("description", "")) if full_content else "",
+                "raw_timestamp": "",
+                "content": "",
                 "extracted_at": now_iso,
             })
         if extracted:
             return 200, extracted
-    matches = re.findall(
-        r'<a[^>]*href=[\"\']([^\"\']*jobs/(\d+)[^\"\']*)[\"\'][^>]*>.*?<span[^>]*class=[\"\'][^\"\']*title[^\"]*[\"\']>([^<]+)</span>(?:.*?<span[^>]*class=[\"\'][^\"\']*location[^\"]*[\"\']>([^<]+))?',
-        html, re.DOTALL | re.I
-    )
-    seen = set()
-    for path, jid, title, loc in matches:
-        if jid in seen:
-            continue
-        seen.add(jid)
-        loc_str = (loc or "").strip()
-        t_clean = title.strip()
-        apply_u = path if path.startswith("http") else f"https://www.paycomonline.net{path}"
-        extracted.append({
-            "job_id": f"paycom_{slug}_{jid}",
-            "platform": "paycom",
-            "company_name": company_name,
-            "company_slug": slug,
-            "title": t_clean,
-            "location": loc_str,
-            "is_us": 1 if is_us_location(loc_str, extra_text=t_clean) else 0,
-            "apply_url": apply_u,
-            "department": "",
-            "office": "",
-            "employment_type": "",
-            "posted_at": "",
-            "updated_at": "",
-            "raw_timestamp": "",
-            "content": "",
-            "extracted_at": now_iso,
-        })
-    return 200, extracted
+    return 200 if extracted else (st or status), extracted
 
 
 async def extract_paylocity(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
-    url_api = f"https://recruiting.paylocity.com/recruiting/jobs/api/jobs/list/{slug}"
-    status, data = await http.get_json(url_api)
-    extracted = []
-    now_iso = datetime.now(timezone.utc).isoformat()
     company_name = slug[:8].title()
-    if status == 200 and isinstance(data, (dict, list)):
-        jobs = data if isinstance(data, list) else (data.get("jobs") or data.get("jobList") or [])
-        for j in jobs:
-            if not isinstance(j, dict):
-                continue
-            jid = str(j.get("jobId") or j.get("id") or "")
-            title = (j.get("jobTitle") or j.get("title") or "").strip()
-            loc = f"{j.get('city', '')}, {j.get('state', '')}".strip(", ")
-            posted = j.get("postedDate") or j.get("datePosted") or ""
-            extracted.append({
-                "job_id": f"paylocity_{slug}_{jid}",
-                "platform": "paylocity",
-                "company_name": company_name,
-                "company_slug": slug,
-                "title": title,
-                "location": loc,
-                "is_us": 1 if is_us_location(loc, extra_text=title) else 0,
-                "apply_url": f"https://recruiting.paylocity.com/recruiting/jobs/Details/{jid}/{slug}",
-                "department": j.get("department") or "",
-                "office": "",
-                "employment_type": j.get("employmentType") or "",
-                "posted_at": parse_to_iso(posted),
-                "updated_at": "",
-                "raw_timestamp": str(posted),
-                "content": clean_html(j.get("description", "")) if full_content else "",
-                "extracted_at": now_iso,
-            })
-        if extracted:
-            return 200, extracted
+    now_iso = datetime.now(timezone.utc).isoformat()
+    extracted = []
+
+    # 1. Native All page embedding window.pageData Jobs array
     url_html = f"https://recruiting.paylocity.com/recruiting/jobs/All/{slug}"
     st, html = await http.get_text(url_html)
     if st == 200 and html:
+        # Check window.pageData Jobs array
+        m = re.search(r'"Jobs":\s*(\[.*?\])\s*,\s*"', html, re.DOTALL)
+        if not m:
+            m = re.search(r'window\.pageData\s*=\s*(\{.*?\});', html, re.DOTALL)
+        if m:
+            try:
+                blob = json.loads(m.group(1))
+                raw_jobs = blob if isinstance(blob, list) else (blob.get("Jobs") or [])
+                for j in raw_jobs:
+                    jid = str(j.get("JobId") or j.get("id") or "")
+                    title = (j.get("JobTitle") or j.get("title") or "").strip()
+                    loc_obj = j.get("JobLocation") or {} if isinstance(j.get("JobLocation"), dict) else {}
+                    city = loc_obj.get("City") or ""
+                    state = loc_obj.get("State") or ""
+                    country = loc_obj.get("Country") or ""
+                    loc_name = (j.get("LocationName") or "").strip()
+                    loc = f"{city}, {state}".strip(", ") or loc_name or country
+                    is_rem = bool(j.get("IsRemote")) or (j.get("IndeedRemoteType") in (1, 2)) or "remote" in loc_name.lower() or "remote" in title.lower()
+                    pub_d = j.get("PublishedDate") or j.get("postedDate") or ""
+                    extracted.append({
+                        "job_id": f"paylocity_{slug}_{jid}",
+                        "platform": "paylocity",
+                        "company_name": company_name,
+                        "company_slug": slug,
+                        "title": title,
+                        "location": loc,
+                        "is_us": 1 if (is_rem or country in ("USA", "US", "United States") or is_us_location(loc, extra_text=title)) else 0,
+                        "apply_url": f"https://recruiting.paylocity.com/recruiting/jobs/Details/{jid}/{slug}",
+                        "department": j.get("Department") or j.get("department") or "",
+                        "office": "Remote" if is_rem else "",
+                        "employment_type": j.get("EmploymentType") or j.get("employmentType") or "",
+                        "posted_at": parse_to_iso(pub_d),
+                        "updated_at": "",
+                        "raw_timestamp": str(pub_d),
+                        "content": clean_html(j.get("Description", "")) if full_content else "",
+                        "extracted_at": now_iso,
+                    })
+                if extracted:
+                    return 200, extracted
+            except Exception:
+                pass
+
+        # Fallback to jsonld if present
         ld_jobs = extract_jsonld_job_postings(html)
         for j in ld_jobs:
             title = j.get("title", "").strip()
@@ -1525,143 +1677,239 @@ async def extract_paylocity(http: AsyncHTTPClient, slug: str, full_content: bool
                 "content": clean_html(j.get("description", "")) if full_content else "",
                 "extracted_at": now_iso,
             })
-        return 200, extracted
-    return status, []
+        if extracted:
+            return 200, extracted
+
+    return st, []
 
 
-async def extract_dayforce(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
-    url = f"https://jobs.dayforcehcm.com/en-US/{slug}/CANDIDATEPORTAL"
-    status, html = await http.get_text(url)
-    if status != 200 or not html:
-        return status, []
-    company_name = slug.upper()
-    extracted = []
+async def extract_dayforce(http: AsyncHTTPClient, slug_or_url: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    tenant, site, culture = "", "CANDIDATEPORTAL", "en-US"
+    if slug_or_url.startswith("http"):
+        p = urlparse(slug_or_url).path.strip("/").split("/")
+        if len(p) >= 3:
+            culture, tenant, site = p[0], p[1], p[2]
+        elif len(p) == 2:
+            tenant, site = p[0], p[1]
+        elif len(p) == 1:
+            tenant = p[0]
+    elif "/" in slug_or_url:
+        parts = slug_or_url.strip("/").split("/")
+        if len(parts) >= 2:
+            tenant, site = parts[0], parts[1]
+        else:
+            tenant = parts[0]
+    else:
+        tenant = slug_or_url.strip()
+
+    if not tenant:
+        return 0, []
+
+    company_name = tenant.replace("-", " ").title()
     now_iso = datetime.now(timezone.utc).isoformat()
-    ld_jobs = extract_jsonld_job_postings(html)
-    if ld_jobs:
-        for j in ld_jobs:
-            title = j.get("title", "").strip()
-            loc_obj = j.get("jobLocation", {}).get("address", {}) if isinstance(j.get("jobLocation"), dict) else {}
-            loc = f"{loc_obj.get('addressLocality', '')}, {loc_obj.get('addressRegion', '')}".strip(", ")
-            u = j.get("url") or ""
-            jid = u.rstrip("/").split("/")[-1] if u else str(hash(title))
-            date_p = j.get("datePosted") or ""
+    extracted = []
+
+    # 1. Dayforce Geo Search API with CSRF token
+    csrf_st, csrf_data = await http.get_json("https://jobs.dayforcehcm.com/api/auth/csrf")
+    csrf_token = csrf_data.get("csrfToken") if (csrf_st == 200 and isinstance(csrf_data, dict)) else ""
+
+    headers = {"X-CSRF-TOKEN": csrf_token, "Content-Type": "application/json"} if csrf_token else {"Content-Type": "application/json"}
+    search_url = f"https://jobs.dayforcehcm.com/api/geo/{tenant}/jobposting/search"
+    body = {
+        "clientNamespace": tenant,
+        "jobBoardCode": site,
+        "cultureCode": culture,
+        "paginationStart": 0
+    }
+    st, res = await http.post_json(search_url, body, headers=headers)
+    if st == 200 and isinstance(res, dict):
+        postings = res.get("jobPostings") or []
+        for p in postings:
+            jid = str(p.get("jobPostingId") or "")
+            title = (p.get("jobTitle") or "").strip()
+            loc_list = p.get("postingLocations") or []
+            loc_strs = []
+            for a in loc_list:
+                if isinstance(a, dict):
+                    parts = [a.get("cityName", ""), a.get("stateCode", ""), a.get("isoCountryCode", "")]
+                    loc_strs.append(", ".join([pt for pt in parts if pt]))
+            loc = "; ".join(loc_strs)
+            is_rem = bool(p.get("hasVirtualLocation")) or "remote" in title.lower() or is_us_location(loc, extra_text=title)
+            created = p.get("postingStartTimestampUTC") or ""
+            apply_u = f"https://jobs.dayforcehcm.com/{culture}/{tenant}/{site}/jobs/{jid}"
             extracted.append({
-                "job_id": f"dayforce_{slug}_{jid}",
+                "job_id": f"dayforce_{tenant}_{jid}",
                 "platform": "dayforce",
                 "company_name": company_name,
-                "company_slug": slug,
+                "company_slug": tenant,
                 "title": title,
                 "location": loc,
-                "is_us": 1 if is_us_location(loc, extra_text=title) else 0,
-                "apply_url": u if u.startswith("http") else f"https://jobs.dayforcehcm.com{u}",
+                "is_us": 1 if is_rem else 0,
+                "apply_url": apply_u,
                 "department": "",
-                "office": "",
-                "employment_type": j.get("employmentType") or "",
-                "posted_at": parse_to_iso(date_p),
+                "office": "Remote" if p.get("hasVirtualLocation") else "",
+                "employment_type": "",
+                "posted_at": parse_to_iso(created),
                 "updated_at": "",
-                "raw_timestamp": str(date_p),
-                "content": clean_html(j.get("description", "")) if full_content else "",
+                "raw_timestamp": str(created),
+                "content": clean_html(p.get("jobDescription", "")) if full_content else "",
                 "extracted_at": now_iso,
             })
         if extracted:
             return 200, extracted
-    matches = re.findall(
-        r'href=[\"\'](/en-US/[^/]+/CANDIDATEPORTAL/jobs/(\d+))[\"\'][^>]*>([^<]+)</a>',
-        html, re.I
-    )
-    seen = set()
-    for path, jid, title in matches:
-        if jid in seen:
-            continue
-        seen.add(jid)
-        t_clean = title.strip()
-        extracted.append({
-            "job_id": f"dayforce_{slug}_{jid}",
-            "platform": "dayforce",
-            "company_name": company_name,
-            "company_slug": slug,
-            "title": t_clean,
-            "location": "",
-            "is_us": 1,
-            "apply_url": f"https://jobs.dayforcehcm.com{path}",
-            "department": "",
-            "office": "",
-            "employment_type": "",
-            "posted_at": "",
-            "updated_at": "",
-            "raw_timestamp": "",
-            "content": "",
-            "extracted_at": now_iso,
-        })
-    return 200, extracted
 
-
-async def extract_ukg(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
-    url = f"https://recruiting2.ultipro.com/{slug}/JobBoard"
-    status, html = await http.get_text(url)
-    if status != 200 or not html:
-        return status, []
-    company_name = slug[:8].title()
-    extracted = []
-    now_iso = datetime.now(timezone.utc).isoformat()
-    ld_jobs = extract_jsonld_job_postings(html)
-    if ld_jobs:
-        for j in ld_jobs:
-            title = j.get("title", "").strip()
-            loc_obj = j.get("jobLocation", {}).get("address", {}) if isinstance(j.get("jobLocation"), dict) else {}
-            loc = f"{loc_obj.get('addressLocality', '')}, {loc_obj.get('addressRegion', '')}".strip(", ")
-            u = j.get("url") or ""
-            jid = u.rstrip("/").split("/")[-1] if u else str(hash(title))
-            date_p = j.get("datePosted") or ""
+    # 2. HTML scraping fallback
+    url_html = f"https://jobs.dayforcehcm.com/{culture}/{tenant}/{site}"
+    st_h, html = await http.get_text(url_html)
+    if st_h == 200 and html:
+        matches = re.findall(
+            r'href=[\"\'](/[^/]+/[^/]+/[^/]+/jobs/(\d+))[\"\'][^>]*>([^<]+)</a>',
+            html, re.I
+        )
+        for path, jid, title in matches:
+            t_clean = title.strip()
             extracted.append({
-                "job_id": f"ukg_{slug}_{jid}",
-                "platform": "ukg",
+                "job_id": f"dayforce_{tenant}_{jid}",
+                "platform": "dayforce",
                 "company_name": company_name,
-                "company_slug": slug,
-                "title": title,
-                "location": loc,
-                "is_us": 1 if is_us_location(loc, extra_text=title) else 0,
-                "apply_url": u,
+                "company_slug": tenant,
+                "title": t_clean,
+                "location": "",
+                "is_us": 1,
+                "apply_url": f"https://jobs.dayforcehcm.com{path}",
                 "department": "",
                 "office": "",
-                "employment_type": j.get("employmentType") or "",
-                "posted_at": parse_to_iso(date_p),
+                "employment_type": "",
+                "posted_at": "",
                 "updated_at": "",
-                "raw_timestamp": str(date_p),
-                "content": clean_html(j.get("description", "")) if full_content else "",
+                "raw_timestamp": "",
+                "content": "",
                 "extracted_at": now_iso,
             })
         return 200, extracted
-    matches = re.findall(
-        r'href=[\"\'](/[^/]+/JobBoard/[^/]+/OpportunityDetail\?opportunityId=([a-zA-Z0-9_-]+))[\"\'][^>]*>([^<]+)</a>',
-        html, re.I
-    )
-    seen = set()
-    for path, jid, title in matches:
-        if jid in seen:
-            continue
-        seen.add(jid)
-        t_clean = title.strip()
-        extracted.append({
-            "job_id": f"ukg_{slug}_{jid}",
-            "platform": "ukg",
-            "company_name": company_name,
-            "company_slug": slug,
-            "title": t_clean,
-            "location": "",
-            "is_us": 1,
-            "apply_url": f"https://recruiting2.ultipro.com{path}",
-            "department": "",
-            "office": "",
-            "employment_type": "",
-            "posted_at": "",
-            "updated_at": "",
-            "raw_timestamp": "",
-            "content": "",
-            "extracted_at": now_iso,
-        })
-    return 200, extracted
+
+    return st if st else st_h, []
+
+
+async def extract_ukg(http: AsyncHTTPClient, slug_or_url: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    host, tenant, guid = "recruiting2.ultipro.com", "", ""
+    if slug_or_url.startswith("http"):
+        parsed = urlparse(slug_or_url)
+        host = parsed.netloc or host
+        p = parsed.path.strip("/").split("/")
+        if len(p) >= 3 and p[1].lower() == "jobboard":
+            tenant, guid = p[0], p[2]
+        elif len(p) >= 1:
+            tenant = p[0]
+    elif "/" in slug_or_url:
+        p = slug_or_url.strip("/").split("/")
+        if len(p) >= 3 and p[1].lower() == "jobboard":
+            tenant, guid = p[0], p[2]
+        elif len(p) >= 2:
+            tenant, guid = p[0], p[1]
+        else:
+            tenant = p[0]
+    else:
+        tenant = slug_or_url.strip()
+
+    if not tenant:
+        return 0, []
+
+    company_name = tenant.replace("-", " ").title()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    extracted = []
+
+    # If guid is missing, try discovering from tenant page
+    if not guid:
+        for try_host in (host, "recruiting.ultipro.com"):
+            st, html = await http.get_text(f"https://{try_host}/{tenant}")
+            if st == 200 and html:
+                m = re.search(r'/JobBoard/([a-zA-Z0-9-]+)', html)
+                if m:
+                    guid = m.group(1)
+                    host = try_host
+                    break
+
+    # If we have guid, use LoadSearchResults JSON API
+    if guid:
+        search_url = f"https://{host}/{tenant}/JobBoard/{guid}/JobBoardView/LoadSearchResults"
+        body = {"opportunitySearch": {"Top": 50, "Skip": 0}}
+        st, data = await http.post_json(search_url, body)
+        if st == 200 and isinstance(data, dict):
+            opps = data.get("opportunities") or []
+            for o in opps:
+                jid = str(o.get("Id") or "")
+                title = (o.get("Title") or "").strip()
+                locs = o.get("Locations") or []
+                loc_str = ""
+                if locs and isinstance(locs, list):
+                    l_first = locs[0] if isinstance(locs[0], dict) else {}
+                    addr = l_first.get("Address") or {} if isinstance(l_first.get("Address"), dict) else {}
+                    city = addr.get("City") or ""
+                    state = (addr.get("State") or {}).get("Name", "") if isinstance(addr.get("State"), dict) else ""
+                    country = (addr.get("Country") or {}).get("Name", "") if isinstance(addr.get("Country"), dict) else ""
+                    parts = [city, state, country]
+                    loc_str = ", ".join([p for p in parts if p]) or (l_first.get("LocalizedName") or "")
+                created = o.get("PostedDate") or ""
+                desc = o.get("BriefDescription") or ""
+                apply_u = f"https://{host}/{tenant}/JobBoard/{guid}/OpportunityDetail?opportunityId={jid}"
+                is_rem = "remote" in title.lower() or "remote" in loc_str.lower() or is_us_location(loc_str, extra_text=title)
+                extracted.append({
+                    "job_id": f"ukg_{tenant}_{jid}",
+                    "platform": "ukg",
+                    "company_name": company_name,
+                    "company_slug": tenant,
+                    "title": title,
+                    "location": loc_str,
+                    "is_us": 1 if is_rem else 0,
+                    "apply_url": apply_u,
+                    "department": "",
+                    "office": "Remote" if "remote" in loc_str.lower() else "",
+                    "employment_type": "",
+                    "posted_at": parse_to_iso(created),
+                    "updated_at": "",
+                    "raw_timestamp": str(created),
+                    "content": clean_html(desc) if full_content else "",
+                    "extracted_at": now_iso,
+                })
+            if extracted:
+                return 200, extracted
+
+    # Fallback to HTML scraping
+    url_html = f"https://{host}/{tenant}/JobBoard"
+    st_h, html = await http.get_text(url_html)
+    if st_h == 200 and html:
+        matches = re.findall(
+            r'href=[\"\'](/[^/]+/JobBoard/[^/]+/OpportunityDetail\?opportunityId=([a-zA-Z0-9_-]+))[\"\'][^>]*>([^<]+)</a>',
+            html, re.I
+        )
+        seen = set()
+        for path, jid, title in matches:
+            if jid in seen:
+                continue
+            seen.add(jid)
+            t_clean = title.strip()
+            extracted.append({
+                "job_id": f"ukg_{tenant}_{jid}",
+                "platform": "ukg",
+                "company_name": company_name,
+                "company_slug": tenant,
+                "title": t_clean,
+                "location": "",
+                "is_us": 1,
+                "apply_url": f"https://{host}{path}",
+                "department": "",
+                "office": "",
+                "employment_type": "",
+                "posted_at": "",
+                "updated_at": "",
+                "raw_timestamp": "",
+                "content": "",
+                "extracted_at": now_iso,
+            })
+        return 200, extracted
+
+    return 0, []
 
 
 async def extract_successfactors(http: AsyncHTTPClient, slug: str, full_content: bool) -> Tuple[int, List[Dict[str, Any]]]:
@@ -2386,7 +2634,7 @@ def load_companies(input_path: str, default_platform: str) -> List[Tuple[str, st
                 board_url = (row.get("board_url") or "").strip()
                 if ats == "workday" and board_url:
                     slug = board_url
-                if ats == "adp" and board_url and not slug:
+                if ats in ("adp", "ukg", "dayforce") and board_url:
                     slug = board_url
                 if slug:
                     pairs.append((ats, slug))
@@ -2480,7 +2728,7 @@ async def run_extractor(
                     total_jobs_saved += len(to_write_jobs)
 
     # 3. Continuous worker pool with strict per-board timeout
-    async with AsyncHTTPClient(concurrency=concurrency, per_host_concurrency=15, min_host_interval=0.03, timeout=8.0) as http:
+    async with AsyncHTTPClient(concurrency=concurrency, per_host_concurrency=15, min_host_interval=0.03, timeout=12.0) as http:
         db_task = asyncio.create_task(db_writer())
 
         async def worker():
@@ -2496,7 +2744,7 @@ async def run_extractor(
                 status_code, comp_jobs = 0, []
                 if handler:
                     try:
-                        res = await asyncio.wait_for(handler(http, slug, fetch_content), timeout=10.0)
+                        res = await asyncio.wait_for(handler(http, slug, fetch_content), timeout=16.0)
                         if isinstance(res, tuple):
                             status_code, comp_jobs = res
                         elif isinstance(res, list):
