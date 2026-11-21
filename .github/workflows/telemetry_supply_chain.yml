@@ -169,4 +169,4 @@ jobs:
         with:
           name: "supply-chain-jobs-dataset"
           path: supply_chain_jobs_dataset.zip
-          retention-days: 14
+          retention-days: 7

@@ -25,9 +25,9 @@ on:
         required: true
         default: '15'
 
-  # Optional weekly schedule to discover newly indexed companies automatically
-  schedule:
-    - cron: '0 3 * * 1' # Runs every Monday at 3:00 AM UTC
+  # Optional weekly schedule (disabled to conserve free runner minutes)
+  # schedule:
+  #   - cron: '0 3 * * 1' # Runs every Monday at 3:00 AM UTC
 
 permissions:
   contents: write

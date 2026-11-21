@@ -12,9 +12,9 @@ on:
         required: false
         default: "500"
 
-  # Run weekly on Sundays at 04:00 UTC
-  schedule:
-    - cron: "0 4 * * 0"
+  # Run weekly on Sundays at 04:00 UTC (disabled to conserve free runner minutes)
+  # schedule:
+  #   - cron: "0 4 * * 0"
 
 permissions:
   contents: write

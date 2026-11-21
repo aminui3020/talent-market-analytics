@@ -175,4 +175,4 @@ jobs:
         with:
           name: "ai-automation-jobs-dataset"
           path: ai_automation_jobs_dataset.zip
-          retention-days: 14
+          retention-days: 7

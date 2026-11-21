@@ -91,7 +91,6 @@ on:
           - '8'
           - '10'
           - '12'
-          - '32'
       posted_within_days:
         description: '📅 Recency Filter (Keep jobs posted within last N days)'
         required: true
@@ -150,9 +149,9 @@ on:
         type: boolean
         default: false
 
-  # Optional daily automated sync at 06:00 UTC
-  schedule:
-    - cron: '0 6 * * *'
+  # Optional daily automated sync at 06:00 UTC (disabled to conserve free runner minutes)
+  # schedule:
+  #   - cron: '0 6 * * *'
 
 permissions:
   contents: write
@@ -498,7 +497,7 @@ jobs:
             live_jobs_dataset.zip
             live_jobs.db
             live_jobs.csv*
-          retention-days: 14
+          retention-days: 7
 
       - name: Commit and Push Results to Repository
         if: ${{ github.event.inputs.commit_to_git == 'true' }}
