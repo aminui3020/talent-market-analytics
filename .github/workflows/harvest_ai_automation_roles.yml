@@ -1,0 +1,170 @@
+name: AI & Automation 15 Roles Harvester (3-Shard Safe Edition)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platform to scrape"
+        required: true
+        type: choice
+        default: "both"
+        options:
+          - "both"
+          - "linkedin"
+          - "indeed"
+      location:
+        description: "Target location"
+        required: false
+        type: string
+        default: "India"
+      country:
+        description: "Indeed country code"
+        required: false
+        type: string
+        default: "india"
+      auto_split:
+        description: "Auto state split for capped searches"
+        required: false
+        type: boolean
+        default: false
+      post_time:
+        description: "Job posting age filter"
+        required: false
+        type: choice
+        default: "2weeks"
+        options:
+          - "2weeks"
+          - "week"
+          - "day"
+          - "month"
+          - "any"
+
+permissions:
+  contents: read
+
+jobs:
+  scrape-shard:
+    name: "AI Shard ${{ matrix.shard }}/3"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx beautifulsoup4 python-jobspy pandas python-dotenv curl_cffi openpyxl
+
+      - name: Execute AI Shard Roles
+        run: |
+          SPLIT_FLAG=""
+          if [ "${{ github.event.inputs.auto_split }}" = "false" ] || [ -z "${{ github.event.inputs.auto_split }}" ]; then
+            SPLIT_FLAG="--no-state-split"
+          fi
+          python3 tools/run_sharded_roles.py \
+            --role-set ai_automation \
+            --platform "${{ github.event.inputs.platform || 'both' }}" \
+            --shard ${{ matrix.shard }} \
+            --total-shards 3 \
+            --post-time "${{ github.event.inputs.post_time || '2weeks' }}" \
+            --location "${{ github.event.inputs.location || 'India' }}" \
+            --country "${{ github.event.inputs.country || 'india' }}" \
+            $SPLIT_FLAG
+
+      - name: Upload Shard Output Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "ai-shard-output-${{ matrix.shard }}"
+          path: |
+            **/*.csv
+            **/*.json
+          retention-days: 1
+
+  merge-and-package:
+    name: "Merge AI Shards & Create Zip"
+    needs: scrape-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install pandas openpyxl
+
+      - name: Download All Shards
+        uses: actions/download-artifact@v4
+        with:
+          path: ./shards
+          pattern: "ai-shard-output-*"
+          merge-multiple: true
+
+      - name: Merge, Deduplicate & Build Excel
+        run: |
+          python3 -c '
+          import os, glob, pandas as pd
+
+          csv_files = glob.glob("./shards/**/*.csv", recursive=True) + glob.glob("./shards/*.csv")
+          print(f"Discovered {len(csv_files)} CSV files to merge.")
+
+          dfs = []
+          for f in set(csv_files):
+              try:
+                  df = pd.read_csv(f, dtype=str)
+                  if not df.empty:
+                      dfs.append(df)
+              except Exception as e:
+                  print(f"Skipping {f}: {e}")
+
+          os.makedirs("deliverables", exist_ok=True)
+
+          if dfs:
+              merged = pd.concat(dfs, ignore_index=True)
+              dedup_col = "job_url" if "job_url" in merged.columns else ("id" if "id" in merged.columns else None)
+              if dedup_col:
+                  merged = merged.drop_duplicates(subset=[dedup_col])
+              else:
+                  merged = merged.drop_duplicates()
+
+              print(f"Merged total unique AI jobs: {len(merged)}")
+              merged.to_csv("deliverables/ai_automation_jobs_all.csv", index=False)
+
+              with pd.ExcelWriter("deliverables/ai_automation_jobs.xlsx", engine="openpyxl") as writer:
+                  merged.to_excel(writer, sheet_name="AI Jobs", index=False)
+          else:
+              print("No CSV records found.")
+              pd.DataFrame().to_csv("deliverables/ai_automation_jobs_all.csv", index=False)
+          '
+
+      - name: Package Deliverables into Zip Archive
+        run: |
+          zip -9 ai_automation_jobs_dataset.zip deliverables/* || true
+          ls -lh ai_automation_jobs_dataset.zip || true
+
+      - name: Upload Final Deliverable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: "ai-automation-jobs-dataset"
+          path: ai_automation_jobs_dataset.zip
+          retention-days: 14

@@ -1,0 +1,194 @@
+name: Gemini Discovery (v12.0 150K+ US Companies — 8-Shard Edition)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: "Discovery engines (hf,catalogs,pdns,wayback,commoncrawl)"
+        required: false
+        default: "hf,catalogs,pdns,wayback,commoncrawl"
+      from_date:
+        description: "Historical start date YYYYMMDD (e.g. 20150101 or 20210101)"
+        required: false
+        default: "20150101"
+      to_date:
+        description: "Historical end date YYYYMMDD"
+        required: false
+        default: "20261231"
+      wayback_limit:
+        description: "Max collapsed URLs per Wayback CDX query"
+        required: false
+        default: "50000"
+      concurrency:
+        description: "Async HTTP concurrency per runner"
+        required: false
+        default: "80"
+# schedule:
+#   - cron: "0 2 * * 0"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  discover-and-verify-shard:
+    name: "US ATS Shard: ${{ matrix.shard_name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_id: "greenhouse"
+            shard_name: "Greenhouse (All Industries)"
+            platforms: "greenhouse"
+          - shard_id: "modern_cloud_1"
+            shard_name: "Ashby, Lever, Dover, Gem"
+            platforms: "ashby,lever,dover,gem"
+          - shard_id: "modern_cloud_2"
+            shard_name: "Rippling, Workable, Recruitee, Pinpoint"
+            platforms: "rippling,workable,recruitee,pinpoint"
+          - shard_id: "workday_icims"
+            shard_name: "Workday, iCIMS"
+            platforms: "workday,icims"
+          - shard_id: "enterprise_talent"
+            shard_name: "SmartRecruiters, Jobvite, Taleo, SuccessFactors, Fountain"
+            platforms: "smartrecruiters,jobvite,taleo,successfactors,fountain"
+          - shard_id: "smb_hris"
+            shard_name: "BambooHR, JazzHR, BreezyHR, Trakstar"
+            platforms: "bamboohr,jazzhr,breezy,trakstar"
+          - shard_id: "us_payroll_core"
+            shard_name: "Paylocity, Paycom"
+            platforms: "paylocity,paycom"
+          - shard_id: "us_enterprise_hcm"
+            shard_name: "UKG, Dayforce, ADP Workforce Now"
+            platforms: "ukg,dayforce,adp"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies (DuckDB, PyArrow, cdx_toolkit, warcio, aiohttp)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "cdx_toolkit>=0.9.37" "warcio>=1.7.5" "duckdb>=1.0.0" "pyarrow>=15.0.0"
+
+      - name: Fetch OpenPostings (110K+), Job-Board-Aggregator (95K+), and Daily Live Job Chunks (1M+ Jobs)
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/Masterjx9/OpenPostings.git openpostings_repo || true
+          if [ -d "openpostings_repo" ]; then (cd openpostings_repo && git lfs pull || true); fi
+          git clone --depth 1 https://github.com/Riley-Dorrington/job-board-aggregator.git job_board_aggregator_repo || git clone --depth 1 https://github.com/Feashliaa/job-board-aggregator.git job_board_aggregator_repo || true
+          git clone --depth 1 https://github.com/Feashliaa/job-board-data.git job_board_data_repo || git clone --depth 1 https://github.com/Riley-Dorrington/job-board-data.git job_board_data_repo || true
+
+      - name: Run Built-in Self-Test
+        run: |
+          python gemini_discovery.py self-test
+
+      - name: Step 1 - Multi-Corpus Discovery & Direct Live Chunk Pre-Verification
+        timeout-minutes: 100
+        continue-on-error: true
+        run: |
+          python gemini_discovery.py discover \
+            --db "ats_${{ matrix.shard_id }}.db" \
+            --platforms "${{ matrix.platforms }}" \
+            --sources "${{ github.event.inputs.sources || 'hf,catalogs,pdns,wayback,commoncrawl' }}" \
+            --from-date "${{ github.event.inputs.from_date || '20150101' }}" \
+            --to-date "${{ github.event.inputs.to_date || '20261231' }}" \
+            --wayback-limit "${{ github.event.inputs.wayback_limit || '50000' }}" \
+            --concurrency "${{ github.event.inputs.concurrency || '80' }}"
+
+      - name: Step 2 - Rate-Limit-Aware HTTP 200 Verification & US Job Count Extraction
+        timeout-minutes: 250
+        continue-on-error: true
+        run: |
+          python gemini_discovery.py verify \
+            --db "ats_${{ matrix.shard_id }}.db" \
+            --platforms "${{ matrix.platforms }}" \
+            --concurrency "${{ github.event.inputs.concurrency || '80' }}"
+
+      - name: Export Shard Summary & Partial US CSVs
+        if: always()
+        run: |
+          python gemini_discovery.py export \
+            --db "ats_${{ matrix.shard_id }}.db" \
+            --output-dir "./exports_${{ matrix.shard_id }}"
+          if [ -f "./exports_${{ matrix.shard_id }}/SUMMARY.md" ]; then
+            cat "./exports_${{ matrix.shard_id }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Shard SQLite Database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "shard-db-${{ matrix.shard_id }}"
+          path: |
+            ats_${{ matrix.shard_id }}.db
+            exports_${{ matrix.shard_id }}/*
+          retention-days: 14
+
+  merge-and-export:
+    name: "Merge Shards & Export US Company Lists"
+    needs: discover-and-verify-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download All Shard Databases
+        uses: actions/download-artifact@v4
+        with:
+          path: ./shards
+          pattern: "shard-db-*"
+          merge-multiple: true
+
+      - name: Merge All SQLite Shards
+        run: |
+          SHARD_DBS=$(ls ./shards/ats_*.db | paste -sd "," -)
+          echo "Merging shard databases: $SHARD_DBS"
+          python gemini_discovery.py merge-dbs \
+            --inputs "$SHARD_DBS" \
+            --output ats_companies_merged.db
+
+      - name: Export Platform-Wise US Company CSVs
+        run: |
+          python gemini_discovery.py export \
+            --db ats_companies_merged.db \
+            --output-dir ./exports
+          cat ./exports/SUMMARY.md
+          cat ./exports/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload US Job Companies Dataset Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "us-ats-job-companies-dataset"
+          path: |
+            ./exports/*.csv
+            ./exports/*.jsonl
+            ./exports/SUMMARY.md
+            ats_companies_merged.db
+          retention-days: 90

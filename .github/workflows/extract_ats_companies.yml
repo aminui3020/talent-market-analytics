@@ -1,0 +1,82 @@
+name: Extract ATS Companies (Common Crawl)
+
+on:
+  workflow_dispatch:
+    inputs:
+      crawl:
+        description: "🌐 Common Crawl ID ('ALL' for all crawls, or specific ID like CC-MAIN-2026-43)"
+        required: true
+        default: 'CC-MAIN-2026-43'
+      min_year:
+        description: "📅 Earliest crawl year when using ALL"
+        required: true
+        type: choice
+        default: '2024'
+        options:
+          - '2024'
+          - '2025'
+          - '2026'
+      start_shard:
+        description: '🔢 Starting shard index (0 to 299) - ATS boards cluster in 250-299'
+        required: true
+        default: '270'
+      num_shards:
+        description: '⚡ Number of Parquet shards to scan per crawl (1 to 30)'
+        required: true
+        default: '15'
+
+  # Optional weekly schedule to discover newly indexed companies automatically
+  schedule:
+    - cron: '0 3 * * 1' # Runs every Monday at 3:00 AM UTC
+
+permissions:
+  contents: write
+
+jobs:
+  extract-companies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install duckdb requests warcio
+
+      - name: Run Common Crawl ATS Extraction
+        run: |
+          START=${{ github.event.inputs.start_shard || '270' }}
+          SHARDS=${{ github.event.inputs.num_shards || '15' }}
+          CRAWL=${{ github.event.inputs.crawl || 'CC-MAIN-2026-43' }}
+          MIN_YEAR=${{ github.event.inputs.min_year || '2024' }}
+
+          echo "Running ATS Extraction (crawl=$CRAWL, min_year=$MIN_YEAR, start=$START, shards=$SHARDS)..."
+          python gha_crawl_ats.py \
+            --crawl "$CRAWL" \
+            --min-year "$MIN_YEAR" \
+            --start "$START" \
+            --shards "$SHARDS" \
+            --greenhouse-file "greenhouse_companies.txt"
+
+      - name: Commit and Push Updated Company List
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git rebase origin/main || (git reset --hard origin/main)
+          git add *.txt *.csv exports/*.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Automated: update ATS company lists from Common Crawl [skip ci]"
+            git push origin main || git push --force-with-lease origin main
+          fi
+
