@@ -128,8 +128,12 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("reports_to", "")
     out["is_enriched"] = 1
 
-    # 1. Main JD extraction engine
-    if desc:
+    sidebar_work_mode = raw.get("work_mode") or raw.get("office") or ""
+    sidebar_job_type = raw.get("employment_type") or ""
+    sidebar_comp = raw.get("compensation")
+
+    # 1. Main JD extraction engine (forwards sidebar metadata alongside JD text)
+    if desc or sidebar_comp or sidebar_work_mode or sidebar_job_type:
         try:
             eng = extract_job({
                 "title": title,
@@ -137,6 +141,16 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
                 "description": desc,
                 "company": company,
                 "source_board": platform,
+                "work_mode": sidebar_work_mode,
+                "job_type": sidebar_job_type,
+                "compensation": sidebar_comp,
+                "salary": raw.get("salary") or "",
+                "structured_fields": {
+                    k: v for k, v in (
+                        ("work_mode", sidebar_work_mode),
+                        ("job_type", sidebar_job_type),
+                    ) if v
+                },
             })
             if eng:
                 out["salary"] = eng.get("salary") or ""
@@ -144,14 +158,21 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
                 out["salary_max"] = eng.get("salary_max")
                 out["salary_currency"] = eng.get("salary_currency") or ""
                 out["salary_period"] = eng.get("salary_period") or ""
-                out["skills"] = eng.get("skills") or ""
-                out["skills_required"] = ", ".join(eng.get("skills_required") or [])
-                out["skills_preferred"] = ", ".join(eng.get("skills_preferred") or [])
-                out["work_mode"] = eng.get("work_mode") or ""
-                out["experience_min"] = eng.get("experience_min")
-                out["experience_max"] = eng.get("experience_max")
+                if eng.get("skills"):
+                    out["skills"] = eng.get("skills") or ""
+                if eng.get("skills_required"):
+                    out["skills_required"] = ", ".join(eng.get("skills_required") or [])
+                if eng.get("skills_preferred"):
+                    out["skills_preferred"] = ", ".join(eng.get("skills_preferred") or [])
+                if eng.get("work_mode"):
+                    out["work_mode"] = eng.get("work_mode") or ""
+                if eng.get("experience_min") is not None:
+                    out["experience_min"] = eng.get("experience_min")
+                if eng.get("experience_max") is not None:
+                    out["experience_max"] = eng.get("experience_max")
                 edu = eng.get("education_requirements") or []
-                out["education"] = ", ".join(edu) if isinstance(edu, list) else str(edu)
+                if edu:
+                    out["education"] = ", ".join(edu) if isinstance(edu, list) else str(edu)
                 if eng.get("study_qualifications"):
                     out["study_qualifications"] = eng.get("study_qualifications") or ""
         except Exception:

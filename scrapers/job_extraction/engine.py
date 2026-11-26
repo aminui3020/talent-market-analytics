@@ -734,10 +734,10 @@ def _rules(text, title, source, location=''):
         salaries.extend(salary_candidates('Salary: ' + description_text(board_salary), 'salary', 'board'))
     compensation = source.get('compensation')
     if isinstance(compensation, dict):
-        for key in ('compensationTierSummary', 'scrapeableCompensationSalarySummary', 'salary', 'salaryRange', 'payRange'):
+        for key in ('scrapeableCompensationSalarySummary', 'compensationTierSummary', 'salary', 'salaryRange', 'payRange'):
             value = compensation.get(key)
-            if isinstance(value, str):
-                salaries.extend(salary_candidates(description_text(value), 'compensation.' + key, 'board'))
+            if isinstance(value, str) and value.strip():
+                salaries.extend(salary_candidates('Salary: ' + description_text(value), 'compensation.' + key, 'board'))
     salaries.extend(salary_candidates(text))
     skills = skill_candidates(text)
     # Merge additional source skills only when the JD supports the term.
