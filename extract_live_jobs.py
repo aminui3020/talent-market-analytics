@@ -2475,8 +2475,12 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
                 if sal.get("salary_min") or sal.get("salary_max"):
                     out["salary_min"] = sal.get("salary_min")
                     out["salary_max"] = sal.get("salary_max")
-                    out["salary_currency"] = sal.get("salary_currency") or ""
-                    out["salary_period"] = sal.get("salary_period") or ""
+                    out["salary_currency"] = sal.get("salary_currency") or "USD"
+                    out["salary_period"] = sal.get("salary_period") or "year"
+                    from scrapers.job_extraction.engine import format_salary
+                    out["salary"] = format_salary(
+                        out["salary_min"], out["salary_max"], out["salary_currency"], out["salary_period"]
+                    )
             except Exception:
                 pass
 
@@ -2491,14 +2495,25 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
         except Exception:
             pass
 
-    # 4. Work mode fallback (checks title and location strings)
-    if not out.get("work_mode"):
+    # 4. Work mode fallback + canonical normalization ("On-site" -> "Onsite")
+    if _is_empty_field(out.get("work_mode")):
         try:
             wm = detect_work_mode(raw)
             if wm:
                 out["work_mode"] = wm.title()
         except Exception:
             pass
+    if str(out.get("work_mode") or "").lower().strip() in ("on-site", "on site", "in-office", "in-person"):
+        out["work_mode"] = "Onsite"
+
+    # Normalize salary_period
+    _sp = str(out.get("salary_period") or "").lower().strip()
+    if _sp in ("annual", "annually", "yearly", "yr"):
+        out["salary_period"] = "year"
+    elif _sp in ("hourly", "hr"):
+        out["salary_period"] = "hour"
+    elif _sp in ("monthly", "mo"):
+        out["salary_period"] = "month"
 
     # 5. Title-based Skill Extraction fallback
     if not out.get("skills_required") and not out.get("skills_preferred") and not out.get("skills"):

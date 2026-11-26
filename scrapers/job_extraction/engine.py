@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 
-VERSION = 'jd-v7'
+VERSION = 'jd-v8'
 
 _BOUNDARY = re.compile(r'[;\n]|[.!?](?=\s|$)')
 
@@ -148,6 +148,13 @@ def salary_candidates(text, field='description', source='jd'):
         # All bare numeric ranges require pay context, not merely plausible size.
         if not money_signal and not _PAY.search(before):
             continue
+        # Bare numbers without currency symbol below 100 are only valid if explicitly paired with a pay period (e.g. "25/hr").
+        if not (g['c1'] or g['c2'] or g['suffix']) and not g['u1'] and not g['u2']:
+            try:
+                if float(g['n1'].replace(',', '')) < 100 and not any(re.search(pat, after[:30], re.I) for pat in _PERIODS.values()):
+                    continue
+            except ValueError:
+                pass
         if re.match(r'\s*(?:%|years?\b|yrs?\b|days?\s+(?:of\s+)?(?:PTO|leave)|countries\b|employees\b|people\b)', after, re.I):
             continue
         if re.search(r'\b(?:401\s*\(?k\)?|funding|funded|raised|revenue|valuation|budget|sales target|insurance coverage|life insurance|'
@@ -488,7 +495,7 @@ def experience_candidates(text):
             if unit and _NOT_EXPERIENCE.match(text, match.start() + unit.end()):
                 continue
             low, high = _years_value(match['low']), _years_value(match.groupdict().get('high'))
-            if low is None or low > 40 or (high is not None and (high < low or high > 40)):
+            if low is None or low > 20 or (high is not None and (high < low or high > 25)):
                 continue
             start = match.start('low')
             if any(abs(start - other) < 3 for other in seen):
@@ -835,10 +842,17 @@ def _resolve(candidate, location):
             # "$60,000 - $80,000 per hour": the period word belonged to another amount.
             c['period'] = None
         if not c.get('period'):
-            c['period'] = 'year' if top >= 15_000 else 'hour' if 7 <= top <= 100 else None
+            c['period'] = 'year' if top >= 15_000 else 'hour' if 7 <= top <= 250 else None
             c['period_inferred'] = bool(c['period'])
-        if not c['period']:
+        if not c.get('period'):
             return None
+        # Guard against nonsensical annual values (e.g. "$45 - $80 per year" or "$12 per year").
+        if c['period'] == 'year' and top < 10_000:
+            if 7 <= top <= 250:
+                c['period'] = 'hour'
+                c['period_inferred'] = True
+            else:
+                return None
     if c.get('currency') and c.get('period'):
         c['status'] = 'explicit' if not (c.get('currency_inferred') or c.get('period_inferred')) else 'inferred'
     c['text'] = format_salary(c['min'], c['max'], c.get('currency'), c.get('period'))
@@ -977,11 +991,37 @@ def project(raw, result, text, original, source, key):
 
 
 _EDU_DEGREE_PATTERNS = [
-    (re.compile(r"\b(?:Ph\.?D\.?|Doctorate|Doctor of Philosophy)\b", re.I), "PhD Degree"),
-    (re.compile(r"\b(?:Master'?s?(?:\s+degree)?|M\.?S\.?|M\.?Sc\.?|M\.?Tech\.?|M\.?E\.?|MBA)\b", re.I), "Master's Degree"),
-    (re.compile(r"\b(?:Bachelor'?s?(?:\s+degree)?|B\.?S\.?|B\.?Sc\.?|B\.?Tech\.?|B\.?E\.?|B\.?A\.?)\b", re.I), "Bachelor's Degree"),
-    (re.compile(r"\b(?:Associate'?s?(?:\s+degree)?|A\.?S\.?|A\.?A\.?)\b", re.I), "Associate's Degree"),
+    # Case-insensitive spelled-out degree phrases (never match bare "Associate" or English words like "as", "be", "me")
+    (re.compile(r"\b(?:Doctorate|Doctor\s+of\s+Philosophy)\b", re.I), "PhD"),
+    (re.compile(r"\b(?:Master'?s?\s+degree|Master\s+of\s+(?:Science|Arts|Engineering|Technology|Business\s+Administration))\b", re.I), "Master's Degree"),
+    (re.compile(r"\b(?:Bachelor'?s?\s+degree|Bachelor\s+of\s+(?:Science|Arts|Engineering|Technology|Business))\b", re.I), "Bachelor's Degree"),
+    (re.compile(r"\b(?:Associate'?s?\s+degree|Associate\s+of\s+(?:Science|Arts))\b", re.I), "Associate's Degree"),
+    (re.compile(r"\b(?:High\s+School\s+Diploma|GED)\b", re.I), "High School / GED"),
+    # Case-sensitive degree abbreviations (dotted forms for 2-letter combos to prevent matching "AS", "BE", "ME", "MA", "BA")
+    (re.compile(r"\b(?:Ph\.?D\.?)\b"), "PhD"),
+    (re.compile(r"\b(?:M\.?S\.?|M\.?Sc\.?|M\.?Tech\.?|MBA|M\.E\.|M\.A\.)\b"), "Master's Degree"),
+    (re.compile(r"\b(?:B\.?S\.?|B\.?Sc\.?|B\.?Tech\.?|B\.E\.|B\.A\.)\b"), "Bachelor's Degree"),
+    (re.compile(r"\b(?:A\.S\.|A\.A\.)\b"), "Associate's Degree"),
 ]
+
+_CANONICAL_EDU_MAP = {
+    "phd": "PhD", "ph.d": "PhD", "ph.d.": "PhD", "doctorate": "PhD",
+    "master": "Master's Degree", "masters": "Master's Degree", "master's": "Master's Degree", "master's degree": "Master's Degree",
+    "bachelor": "Bachelor's Degree", "bachelors": "Bachelor's Degree", "bachelor's": "Bachelor's Degree", "bachelor's degree": "Bachelor's Degree",
+    "associate": "Associate's Degree", "associates": "Associate's Degree", "associate's": "Associate's Degree", "associate's degree": "Associate's Degree",
+    "high school diploma": "High School / GED", "ged": "High School / GED",
+}
+
+
+def _canonical_edu_label(val: str) -> str:
+    low = val.strip().lower()
+    if low in _CANONICAL_EDU_MAP:
+        return _CANONICAL_EDU_MAP[low]
+    for pat, label in _EDU_DEGREE_PATTERNS:
+        if pat.search(val):
+            return label
+    return val.strip()
+
 
 _STUDY_FIELD_REGEX = re.compile(
     r"\b(?:degree\s+(?:in|of)\s+|in\s+|major\s+in\s+|background\s+in\s+)"
@@ -995,7 +1035,14 @@ _STUDY_FIELD_REGEX = re.compile(
 
 def _extract_study_details(text, existing_edu, basic_q, pref_q):
     """Extract normalized degree list and study/qualification summary from JD text."""
-    degrees = list(existing_edu or [])
+    degrees = []
+    for item in (existing_edu or []):
+        # Ignore bare "associate" from legacy regex unless paired with "degree"
+        if str(item).strip().lower() in ("associate", "associates", "associate's"):
+            continue
+        canon = _canonical_edu_label(str(item))
+        if canon and canon not in degrees:
+            degrees.append(canon)
     for deg_re, deg_name in _EDU_DEGREE_PATTERNS:
         if deg_re.search(text) and deg_name not in degrees:
             degrees.append(deg_name)

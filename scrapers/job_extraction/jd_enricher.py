@@ -96,12 +96,12 @@ def parse_salary(text: str | None) -> dict:
     t = text.strip()
     if not t or t.lower() in {"competitive","n/a","not specified","-","tbd","negotiable","market rate","doe"}: return out
 
-    # Period
+    # Period (canonical: hour | month | year)
     pm = _PERIOD_RE.search(t)
     if pm:
         r = pm.group(0).lower()
-        out["salary_period"] = "hourly" if any(x in r for x in ("hour","/hr","/h")) else \
-                               "monthly" if any(x in r for x in ("month","/mo")) else "annual"
+        out["salary_period"] = "hour" if any(x in r for x in ("hour", "/hr", "/h")) else \
+                               "month" if any(x in r for x in ("month", "/mo")) else "year"
 
     # Currency
     sym = _SYMBOL_RE.search(t)
@@ -119,7 +119,7 @@ def parse_salary(text: str | None) -> dict:
     # Filter: ignore values that look like year numbers (2020–2030 range)
     numbers = [n for n in numbers if not (2000 <= n <= 2100)]
     # Keep only salary-range candidates
-    numbers = [n for n in numbers if n >= 1000 or (out["salary_period"]=="hourly" and n>=5)]
+    numbers = [n for n in numbers if n >= 1000 or (out["salary_period"] == "hour" and 7 <= n <= 500)]
 
     if len(numbers) >= 2:
         out["salary_min"] = min(numbers[:2])
@@ -128,13 +128,27 @@ def parse_salary(text: str | None) -> dict:
         out["salary_min"] = numbers[0]
         out["salary_max"] = numbers[0]
 
-    # Annualise
-    if out["salary_period"] == "hourly" and out["salary_min"] and out["salary_min"] < 500:
-        out["salary_min"] = round(out["salary_min"]*2080)
-        if out["salary_max"]: out["salary_max"] = round(out["salary_max"]*2080)
-    if out["salary_period"] == "monthly" and out["salary_min"] and out["salary_min"] < 20000:
-        out["salary_min"] = round(out["salary_min"]*12)
-        if out["salary_max"]: out["salary_max"] = round(out["salary_max"]*12)
+    # Annualise and keep salary_period consistent with annualised amounts
+    if out["salary_period"] == "hour" and out["salary_min"] and out["salary_min"] < 500:
+        out["salary_min"] = round(out["salary_min"] * 2080)
+        if out["salary_max"]:
+            out["salary_max"] = round(out["salary_max"] * 2080)
+        out["salary_period"] = "year"
+    if out["salary_period"] == "month" and out["salary_min"] and out["salary_min"] < 20000:
+        out["salary_min"] = round(out["salary_min"] * 12)
+        if out["salary_max"]:
+            out["salary_max"] = round(out["salary_max"] * 12)
+        out["salary_period"] = "year"
+
+    # Guard against nonsensical small numbers without explicit period
+    if not out["salary_period"] and out["salary_min"]:
+        if 7 <= out["salary_min"] <= 250 and (out["salary_max"] or out["salary_min"]) <= 250:
+            out["salary_period"] = "hour"
+        elif out["salary_min"] >= 10000:
+            out["salary_period"] = "year"
+        else:
+            out["salary_min"] = None
+            out["salary_max"] = None
 
     return out
 
@@ -183,15 +197,15 @@ def detect_work_mode(raw: dict) -> str | None:
     for k in _WMODE_KEYS:
         v = raw.get(k)
         if v is None: continue
-        if isinstance(v,bool): return "remote" if v else None
+        if isinstance(v,bool): return "Remote" if v else None
         s = str(v).lower().strip()
-        if s in ("remote","1","true","yes","fully remote","wfh"): return "remote"
-        if s == "hybrid": return "hybrid"
-        if s in ("onsite","on-site","on site","in office","in-office","in person","office","0","false","no"): return "onsite"
+        if s in ("remote","1","true","yes","fully remote","wfh"): return "Remote"
+        if s == "hybrid": return "Hybrid"
+        if s in ("onsite","on-site","on site","in office","in-office","in person","office","0","false","no"): return "Onsite"
     corpus = " ".join(str(raw.get(k) or "") for k in ("job_title","title","location","description"))
-    if _RE_HYBRID.search(corpus): return "hybrid"
-    if _RE_REMOTE.search(corpus): return "remote"
-    if _RE_ONSITE.search(corpus): return "onsite"
+    if _RE_HYBRID.search(corpus): return "Hybrid"
+    if _RE_REMOTE.search(corpus): return "Remote"
+    if _RE_ONSITE.search(corpus): return "Onsite"
     return None
 
 
@@ -240,14 +254,17 @@ def extract_experience(raw: dict) -> tuple[float|None, float|None]:
                                    str(raw.get("basic_qualifications") or ""),
                                    str(raw.get("preferred_qualifications") or "")]))[:5000]
     m = _EXP_RANGE.search(corpus)
-    if m: return float(m.group(1)), float(m.group(2))
+    if m and float(m.group(1)) <= 20 and float(m.group(2)) <= 25 and float(m.group(1)) <= float(m.group(2)):
+        return float(m.group(1)), float(m.group(2))
     m = _EXP_PLUS.search(corpus)
-    if m:
-        v = float(m.group(1)); return v, v+3
+    if m and float(m.group(1)) <= 20:
+        v = float(m.group(1)); return v, v + 3
     m = _EXP_ATLEAST.search(corpus)
-    if m: return float(m.group(1)), None
+    if m and float(m.group(1)) <= 20:
+        return float(m.group(1)), None
     m = _EXP_SINGLE.search(corpus)
-    if m: return float(m.group(1)), None
+    if m and float(m.group(1)) <= 20:
+        return float(m.group(1)), None
     return None, None
 
 
@@ -255,11 +272,15 @@ def extract_experience(raw: dict) -> tuple[float|None, float|None]:
 # 8. EDUCATION EXTRACTOR
 # ─────────────────────────────────────────────────────────────────────────────
 _EDU_PATTERNS = [
-    ("phd",        re.compile(r"\b(ph\.?d|doctorate|doctoral)\b",re.I)),
-    ("masters",    re.compile(r"\b(master'?s?|m\.?s\.?\b|m\.?eng\.?\b|m\.?b\.?a\.?\b|msc)\b",re.I)),
-    ("bachelors",  re.compile(r"\b(bachelor'?s?|b\.?s\.?\b|b\.?e\.?\b|b\.?eng\.?\b|b\.?tech\b|undergraduate|degree)\b",re.I)),
-    ("associates", re.compile(r"\b(associate'?s?|a\.?s\.?\b|a\.?a\.?\b)\b",re.I)),
-    ("bootcamp",   re.compile(r"\b(bootcamp|boot\s+camp|coding\s+school)\b",re.I)),
+    ("PhD",                re.compile(r"\b(?:doctorate|doctoral)\b", re.I)),
+    ("PhD",                re.compile(r"\bPh\.?D\.?\b")),
+    ("Master's Degree",    re.compile(r"\b(?:master'?s?\s+degree|master\s+of\s+(?:science|arts|engineering|technology|business))\b", re.I)),
+    ("Master's Degree",    re.compile(r"\b(?:M\.?S\.?|M\.?Sc\.?|M\.?Tech\.?|M\.?Eng\.?|MBA)\b")),
+    ("Bachelor's Degree",  re.compile(r"\b(?:bachelor'?s?\s+degree|bachelor\s+of\s+(?:science|arts|engineering|technology)|undergraduate\s+degree)\b", re.I)),
+    ("Bachelor's Degree",  re.compile(r"\b(?:B\.?S\.?|B\.?Sc\.?|B\.?Tech\.?|B\.?Eng\.?|B\.E\.|B\.A\.)\b")),
+    ("Associate's Degree", re.compile(r"\b(?:associate'?s?\s+degree|associate\s+of\s+(?:science|arts))\b", re.I)),
+    ("Associate's Degree", re.compile(r"\b(?:A\.S\.|A\.A\.)\b")),
+    ("Bootcamp",           re.compile(r"\b(?:bootcamp|boot\s+camp|coding\s+school)\b", re.I)),
 ]
 
 def extract_education(raw: dict) -> list[str]:
@@ -268,7 +289,11 @@ def extract_education(raw: dict) -> list[str]:
         if isinstance(exp,list): return [str(e) for e in exp if e]
         return [str(exp)]
     corpus = " ".join(str(raw.get(k) or "") for k in ("description","basic_qualifications","preferred_qualifications"))[:3000]
-    return [label for label,pat in _EDU_PATTERNS if pat.search(corpus)]
+    found = []
+    for label, pat in _EDU_PATTERNS:
+        if pat.search(corpus) and label not in found:
+            found.append(label)
+    return found
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,7 +438,7 @@ def enrich(raw: dict[str,Any]) -> dict[str,Any]:
         # 7. Work mode + is_remote
         wm = detect_work_mode(raw)
         out["work_mode"] = wm
-        out["is_remote"] = wm == "remote"
+        out["is_remote"] = (wm or "").lower() == "remote"
 
         # 8. Employment type
         out["job_type"] = detect_job_type(raw)

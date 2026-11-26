@@ -49,6 +49,9 @@ NO = '|'.join([
     VISA + r'\s+sponsorship' + GAP + r'not (available )?for (this|the) (role|position)',
     r'(candidates|applicants)\s+(requiring|who require|who need)\s+' + VISA + r'?\s*sponsorship\s+(are\s+)?(not eligible|ineligible|not considered)',
     NEG + r'\s+(sponsor|sponsor or transfer)\s+' + VISA,
+    r'(u\.?s\.?|united states)\s+citizenship\s+(is\s+)?required',
+    r'(must|required to)\s+be\s+(a\s+)?(u\.?s\.?|united states)\s+citizen',
+    r'sponsorship\s+(is\s+)?(not\s+available|unavailable)',
 ])
 YES = '|'.join([
     VISA + r'\s+sponsorship\s+(is\s+|will be\s+)?(available|provided|offered|supported)',
@@ -58,6 +61,7 @@ YES = '|'.join([
     r'(we|the company|this employer)\s+(will|can)\s+sponsor\s+' + H1,
     r'(we|the company|this employer)\s+sponsors?\s+' + VISA,
     VISA + r'\s+sponsorship\s*:\s*yes($|[^a-z])',
+    r'visa\s+sponsorship\s+available',
 ])
 H1_YES = YES.replace(VISA, H1)
 CONDITIONAL = '|'.join([

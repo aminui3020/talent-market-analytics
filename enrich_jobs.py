@@ -30,10 +30,21 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from scrapers.job_extraction.engine import extract_job
+from scrapers.job_extraction.engine import extract_job, format_salary
 from scrapers.job_extraction.jd_enricher import parse_salary, detect_work_mode
 from matching.jd_facts import extract_jd_facts
+import math
 import re
+
+
+def _is_empty_field(val: Any) -> bool:
+    """Checks for None, NaN floats, or blank/null sentinel strings."""
+    if val is None:
+        return True
+    if isinstance(val, float) and math.isnan(val):
+        return True
+    s = str(val).strip()
+    return s == "" or s.lower() in ("nan", "none", "null")
 
 COMMON_TECH_SKILLS = [
     (re.compile(r"\bpython\b", re.I), "Python"),
@@ -110,6 +121,7 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("experience_min", None)
     out.setdefault("experience_max", None)
     out.setdefault("education", "")
+    out.setdefault("study_qualifications", "")
     out.setdefault("h1b_status", "unknown")
     out.setdefault("visa_sponsorship_status", "unknown")
     out.setdefault("sponsorship_evidence", "")
@@ -140,6 +152,8 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
                 out["experience_max"] = eng.get("experience_max")
                 edu = eng.get("education_requirements") or []
                 out["education"] = ", ".join(edu) if isinstance(edu, list) else str(edu)
+                if eng.get("study_qualifications"):
+                    out["study_qualifications"] = eng.get("study_qualifications") or ""
         except Exception:
             pass
 
@@ -150,19 +164,33 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
             if sal.get("salary_min") or sal.get("salary_max"):
                 out["salary_min"] = sal.get("salary_min")
                 out["salary_max"] = sal.get("salary_max")
-                out["salary_currency"] = sal.get("salary_currency") or ""
-                out["salary_period"] = sal.get("salary_period") or ""
+                out["salary_currency"] = sal.get("salary_currency") or "USD"
+                out["salary_period"] = sal.get("salary_period") or "year"
+                out["salary"] = format_salary(
+                    out["salary_min"], out["salary_max"], out["salary_currency"], out["salary_period"]
+                )
         except Exception:
             pass
 
-    # 3. Work mode fallback
-    if not out.get("work_mode"):
+    # 3. Work mode fallback + canonical normalization
+    if _is_empty_field(out.get("work_mode")):
         try:
             wm = detect_work_mode(raw)
             if wm:
                 out["work_mode"] = wm.title()
         except Exception:
             pass
+    if str(out.get("work_mode") or "").lower().strip() in ("on-site", "on site", "in-office", "in-person"):
+        out["work_mode"] = "Onsite"
+
+    # Normalize salary_period
+    _sp = str(out.get("salary_period") or "").lower().strip()
+    if _sp in ("annual", "annually", "yearly", "yr"):
+        out["salary_period"] = "year"
+    elif _sp in ("hourly", "hr"):
+        out["salary_period"] = "hour"
+    elif _sp in ("monthly", "mo"):
+        out["salary_period"] = "month"
 
     # 4. JD Facts: H-1B, Visa Sponsorship, and Reporting Line
     if desc:
@@ -196,6 +224,21 @@ def enrich_record(raw: Dict[str, Any]) -> Dict[str, Any]:
             out["experience_min"] = 8.0
         elif any(w in t_low for w in ["director", "vp", "head of", "chief"]):
             out["experience_min"] = 10.0
+
+    # 7. Education & Study Qualifications fallback
+    if _is_empty_field(out.get("education")):
+        t_low = title.lower()
+        if "scientist" in t_low or "research" in t_low:
+            out["education"] = "Master's Degree / PhD preferred"
+        elif any(w in t_low for w in ["lead", "principal", "staff", "architect", "director"]):
+            out["education"] = "Bachelor's Degree in related field"
+        elif any(w in t_low for w in ["senior", "sr.", "sr "]):
+            out["education"] = "Bachelor's Degree required; Master's preferred"
+        else:
+            out["education"] = "Bachelor's Degree or equivalent experience"
+
+    if _is_empty_field(out.get("study_qualifications")):
+        out["study_qualifications"] = f"Degree: {out['education']}"
 
     return out
 
@@ -348,6 +391,7 @@ def enrich_sqlite_db(
         ("experience_min", "REAL"),
         ("experience_max", "REAL"),
         ("education", "TEXT"),
+        ("study_qualifications", "TEXT"),
         ("h1b_status", "TEXT"),
         ("visa_sponsorship_status", "TEXT"),
         ("sponsorship_evidence", "TEXT"),
@@ -403,6 +447,7 @@ def enrich_sqlite_db(
             experience_min = :experience_min,
             experience_max = :experience_max,
             education = :education,
+            study_qualifications = :study_qualifications,
             h1b_status = :h1b_status,
             visa_sponsorship_status = :visa_sponsorship_status,
             sponsorship_evidence = :sponsorship_evidence,
