@@ -2295,6 +2295,9 @@ async def fetch_jd_content_on_demand(
                 if st == 200 and isinstance(data, dict):
                     if data.get("education"):
                         meta["education"] = data.get("education")
+                    ts = parse_to_iso(data.get("first_published") or data.get("updated_at") or "")
+                    if ts:
+                        meta["posted_at"] = ts
                     c = data.get("content") or ""
                     if len(c) > 50:
                         return html.unescape(c), meta
@@ -2305,6 +2308,9 @@ async def fetch_jd_content_on_demand(
                 api = f"https://api.lever.co/v0/postings/{m.group(1)}/{m.group(2)}"
                 st, data = await http.get_json(api)
                 if st == 200 and isinstance(data, dict):
+                    ts = parse_to_iso(data.get("createdAt") or "")
+                    if ts:
+                        meta["posted_at"] = ts
                     desc = data.get("descriptionPlain") or data.get("description", "")
                     for lst in data.get("lists", []):
                         desc += "\n" + (lst.get("text", "") or "") + "\n" + (lst.get("content", "") or "")
@@ -2317,6 +2323,9 @@ async def fetch_jd_content_on_demand(
                 api = f"https://api.smartrecruiters.com/v1/companies/{m.group(1)}/postings/{m.group(2)}"
                 st, data = await http.get_json(api)
                 if st == 200 and isinstance(data, dict):
+                    ts = parse_to_iso(data.get("releasedDate") or "")
+                    if ts:
+                        meta["posted_at"] = ts
                     sec = data.get("jobAd", {}).get("sections", {})
                     desc = (sec.get("jobDescription", {}).get("text", "") or "") + "\n" + (sec.get("qualifications", {}).get("text", "") or "")
                     if len(desc) > 50:
@@ -2329,6 +2338,9 @@ async def fetch_jd_content_on_demand(
                 api = f"https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions/{m_jid.group(1)}?cid={m_cid.group(1)}&lang=en_US"
                 st, data = await http.get_json(api)
                 if st == 200 and isinstance(data, dict):
+                    ts = parse_to_iso(data.get("postDate") or data.get("postedDate") or "")
+                    if ts:
+                        meta["posted_at"] = ts
                     desc = data.get("requisitionDescription") or ""
                     if len(desc) > 50:
                         return html.unescape(desc), meta
@@ -2343,6 +2355,9 @@ async def fetch_jd_content_on_demand(
                 try:
                     u_data = json.loads(m_ukg.group(1))
                     desc = u_data.get("Description") or ""
+                    ts = parse_to_iso(u_data.get("PostedDate") or u_data.get("UpdatedDate") or "")
+                    if ts:
+                        meta["posted_at"] = ts
                     if u_data.get("CompensationAnnualMinimum") or u_data.get("CompensationAnnualMaximum"):
                         meta["salary_min"] = u_data.get("CompensationAnnualMinimum")
                         meta["salary_max"] = u_data.get("CompensationAnnualMaximum")
@@ -2367,6 +2382,9 @@ async def fetch_jd_content_on_demand(
                                     break
                         if data.get("@type") == "JobPosting":
                             desc = data.get("description") or ""
+                            ts = parse_to_iso(data.get("datePosted") or "")
+                            if ts:
+                                meta["posted_at"] = ts
                             bs = data.get("baseSalary")
                             if isinstance(bs, dict) and isinstance(bs.get("value"), dict):
                                 val = bs["value"]
@@ -2426,7 +2444,15 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
     out.setdefault("sponsorship_evidence", "")
     out.setdefault("reports_to", "")
     out.setdefault("is_enriched", 0)
-    out.setdefault("extracted_at", datetime.now(timezone.utc).isoformat())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    out.setdefault("extracted_at", now_iso)
+    out.setdefault("first_seen_at", now_iso)
+    out.setdefault("last_seen_at", now_iso)
+    if _is_empty_field(out.get("posted_at")):
+        out["posted_at"] = out["first_seen_at"]
+        out.setdefault("date_source", "first_seen")
+    else:
+        out.setdefault("date_source", "ats_api")
 
     if not enable_enrichment or not HAS_ENRICHMENT:
         return out
@@ -2593,7 +2619,10 @@ def init_db(db_path: str):
             sponsorship_evidence TEXT,
             reports_to TEXT,
             is_enriched INTEGER DEFAULT 0,
-            extracted_at TEXT NOT NULL
+            extracted_at TEXT NOT NULL,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            date_source TEXT
         );
     """)
 
@@ -2620,6 +2649,9 @@ def init_db(db_path: str):
         ("sponsorship_evidence", "TEXT"),
         ("reports_to", "TEXT"),
         ("is_enriched", "INTEGER DEFAULT 0"),
+        ("first_seen_at", "TEXT"),
+        ("last_seen_at", "TEXT"),
+        ("date_source", "TEXT"),
     ]
     for col_name, col_type in columns_to_add:
         if col_name not in existing_cols:
@@ -2639,6 +2671,7 @@ def init_db(db_path: str):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_platform ON live_jobs(platform);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_company ON live_jobs(company_slug);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_posted ON live_jobs(posted_at);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_first_seen ON live_jobs(first_seen_at);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_us ON live_jobs(is_us);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_india ON live_jobs(is_india);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sal ON live_jobs(salary_min);")
@@ -2712,21 +2745,70 @@ def save_jobs_batch(db_path: str, jobs: List[Dict[str, Any]], enable_enrichment:
     cur.execute("PRAGMA synchronous = OFF;")
     cur.execute("PRAGMA journal_mode = WAL;")
     cur.executemany("""
-        INSERT OR REPLACE INTO live_jobs (
+        INSERT INTO live_jobs (
             job_id, platform, company_name, company_slug, title, location, is_us, is_india,
             apply_url, department, office, employment_type, posted_at, updated_at,
             raw_timestamp, content, salary, salary_min, salary_max, salary_currency,
             salary_period, skills, skills_required, skills_preferred, work_mode,
             experience_min, experience_max, education, study_qualifications, h1b_status,
-            visa_sponsorship_status, sponsorship_evidence, reports_to, is_enriched, extracted_at
+            visa_sponsorship_status, sponsorship_evidence, reports_to, is_enriched,
+            extracted_at, first_seen_at, last_seen_at, date_source
         ) VALUES (
             :job_id, :platform, :company_name, :company_slug, :title, :location, :is_us, :is_india,
             :apply_url, :department, :office, :employment_type, :posted_at, :updated_at,
             :raw_timestamp, :content, :salary, :salary_min, :salary_max, :salary_currency,
             :salary_period, :skills, :skills_required, :skills_preferred, :work_mode,
             :experience_min, :experience_max, :education, :study_qualifications, :h1b_status,
-            :visa_sponsorship_status, :sponsorship_evidence, :reports_to, :is_enriched, :extracted_at
+            :visa_sponsorship_status, :sponsorship_evidence, :reports_to, :is_enriched,
+            :extracted_at, :first_seen_at, :last_seen_at, :date_source
         )
+        ON CONFLICT(job_id) DO UPDATE SET
+            platform = excluded.platform,
+            company_name = excluded.company_name,
+            company_slug = excluded.company_slug,
+            title = excluded.title,
+            location = excluded.location,
+            is_us = excluded.is_us,
+            is_india = excluded.is_india,
+            apply_url = excluded.apply_url,
+            department = excluded.department,
+            office = excluded.office,
+            employment_type = excluded.employment_type,
+            posted_at = CASE
+                WHEN live_jobs.date_source IN ('ats_api', 'json_ld') AND live_jobs.posted_at IS NOT NULL AND live_jobs.posted_at != ''
+                    THEN live_jobs.posted_at
+                WHEN excluded.date_source IN ('ats_api', 'json_ld') AND excluded.posted_at IS NOT NULL AND excluded.posted_at != ''
+                    THEN excluded.posted_at
+                ELSE COALESCE(NULLIF(live_jobs.posted_at, ''), excluded.posted_at)
+            END,
+            updated_at = excluded.updated_at,
+            raw_timestamp = excluded.raw_timestamp,
+            content = CASE WHEN length(excluded.content) > 0 THEN excluded.content ELSE live_jobs.content END,
+            salary = COALESCE(NULLIF(excluded.salary, ''), live_jobs.salary),
+            salary_min = COALESCE(excluded.salary_min, live_jobs.salary_min),
+            salary_max = COALESCE(excluded.salary_max, live_jobs.salary_max),
+            salary_currency = COALESCE(NULLIF(excluded.salary_currency, ''), live_jobs.salary_currency),
+            salary_period = COALESCE(NULLIF(excluded.salary_period, ''), live_jobs.salary_period),
+            skills = COALESCE(NULLIF(excluded.skills, ''), live_jobs.skills),
+            skills_required = COALESCE(NULLIF(excluded.skills_required, ''), live_jobs.skills_required),
+            skills_preferred = COALESCE(NULLIF(excluded.skills_preferred, ''), live_jobs.skills_preferred),
+            work_mode = COALESCE(NULLIF(excluded.work_mode, ''), live_jobs.work_mode),
+            experience_min = COALESCE(excluded.experience_min, live_jobs.experience_min),
+            experience_max = COALESCE(excluded.experience_max, live_jobs.experience_max),
+            education = COALESCE(NULLIF(excluded.education, ''), live_jobs.education),
+            study_qualifications = COALESCE(NULLIF(excluded.study_qualifications, ''), live_jobs.study_qualifications),
+            h1b_status = CASE WHEN excluded.h1b_status != 'unknown' THEN excluded.h1b_status ELSE live_jobs.h1b_status END,
+            visa_sponsorship_status = CASE WHEN excluded.visa_sponsorship_status != 'unknown' THEN excluded.visa_sponsorship_status ELSE live_jobs.visa_sponsorship_status END,
+            sponsorship_evidence = COALESCE(NULLIF(excluded.sponsorship_evidence, ''), live_jobs.sponsorship_evidence),
+            reports_to = COALESCE(NULLIF(excluded.reports_to, ''), live_jobs.reports_to),
+            is_enriched = MAX(live_jobs.is_enriched, excluded.is_enriched),
+            extracted_at = excluded.extracted_at,
+            first_seen_at = COALESCE(NULLIF(live_jobs.first_seen_at, ''), excluded.first_seen_at),
+            last_seen_at = excluded.last_seen_at,
+            date_source = CASE
+                WHEN live_jobs.date_source IN ('ats_api', 'json_ld') THEN live_jobs.date_source
+                ELSE excluded.date_source
+            END
     """, prepared)
     conn.commit()
     conn.close()
@@ -3020,12 +3102,15 @@ async def run_extractor(
 
                 if enable_enrichment and valid_comp_jobs:
                     async def _fill_jd(job_item: Dict[str, Any]):
-                        if not (job_item.get("content") or job_item.get("description")):
+                        if not (job_item.get("content") or job_item.get("description")) or not job_item.get("posted_at"):
                             jd_txt, extra_meta = await fetch_jd_content_on_demand(
                                 http, platform, job_item.get("apply_url") or ""
                             )
-                            if jd_txt:
+                            if jd_txt and not (job_item.get("content") or job_item.get("description")):
                                 job_item["content"] = clean_html(jd_txt)
+                            if extra_meta.get("posted_at") and not job_item.get("posted_at"):
+                                job_item["posted_at"] = extra_meta["posted_at"]
+                                job_item["date_source"] = "json_ld"
                             if extra_meta.get("education") and not job_item.get("education"):
                                 job_item["education"] = extra_meta["education"]
                             if extra_meta.get("salary_min") and not job_item.get("salary_min"):
