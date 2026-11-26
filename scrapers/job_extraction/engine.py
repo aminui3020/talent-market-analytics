@@ -948,6 +948,14 @@ def project(raw, result, text, original, source, key):
         exp = {'min': float(board_years), 'max': None, 'evidence': {'text': f'{board_years:g}+ years (board field)'}}
     out = dict(raw)
     sections = section_fields(text)
+    basic_q = raw.get('basic_qualifications') or sections.get('basic_qualifications')
+    pref_q = raw.get('preferred_qualifications') or sections.get('preferred_qualifications')
+    edu_reqs, study_quals = _extract_study_details(
+        text,
+        list(dict.fromkeys(item['value'] for item in result['education'])),
+        basic_q,
+        pref_q,
+    )
     out.update(description=text, description_raw=original, extraction=result,
                salary=selected['text'] if selected else (raw.get('salary') or ''),
                salary_min=selected['min'] if (selected and selected.get('min') is not None) else raw.get('salary_min'),
@@ -960,11 +968,52 @@ def project(raw, result, text, original, source, key):
                is_remote=(result['work_mode']['value'] == 'Remote') if result['work_mode']['value'] else None,
                experience=exp['evidence']['text'] if exp else '',
                experience_min=exp['min'] if exp else None, experience_max=exp['max'] if exp else None,
-               education_requirements=list(dict.fromkeys(item['value'] for item in result['education'])),
-               basic_qualifications=raw.get('basic_qualifications') or sections.get('basic_qualifications'),
-               preferred_qualifications=raw.get('preferred_qualifications') or sections.get('preferred_qualifications'),
+               education_requirements=edu_reqs,
+               study_qualifications=study_quals,
+               basic_qualifications=basic_q,
+               preferred_qualifications=pref_q,
                key_responsibilities=raw.get('key_responsibilities') or sections.get('key_responsibilities'))
     return out
+
+
+_EDU_DEGREE_PATTERNS = [
+    (re.compile(r"\b(?:Ph\.?D\.?|Doctorate|Doctor of Philosophy)\b", re.I), "PhD Degree"),
+    (re.compile(r"\b(?:Master'?s?(?:\s+degree)?|M\.?S\.?|M\.?Sc\.?|M\.?Tech\.?|M\.?E\.?|MBA)\b", re.I), "Master's Degree"),
+    (re.compile(r"\b(?:Bachelor'?s?(?:\s+degree)?|B\.?S\.?|B\.?Sc\.?|B\.?Tech\.?|B\.?E\.?|B\.?A\.?)\b", re.I), "Bachelor's Degree"),
+    (re.compile(r"\b(?:Associate'?s?(?:\s+degree)?|A\.?S\.?|A\.?A\.?)\b", re.I), "Associate's Degree"),
+]
+
+_STUDY_FIELD_REGEX = re.compile(
+    r"\b(?:degree\s+(?:in|of)\s+|in\s+|major\s+in\s+|background\s+in\s+)"
+    r"((?:Computer Science|Data Science|Artificial Intelligence|Machine Learning|Software Engineering|"
+    r"Electrical Engineering|Computer Engineering|Information Technology|Statistics|Mathematics|"
+    r"Physics|Robotics|Informatics|Supply Chain|Operations Management|Business Administration|"
+    r"Logistics|Industrial Engineering|STEM)(?:\s+(?:or|and|related)\s+[\w\s]{1,30})?)\b",
+    re.I,
+)
+
+
+def _extract_study_details(text, existing_edu, basic_q, pref_q):
+    """Extract normalized degree list and study/qualification summary from JD text."""
+    degrees = list(existing_edu or [])
+    for deg_re, deg_name in _EDU_DEGREE_PATTERNS:
+        if deg_re.search(text) and deg_name not in degrees:
+            degrees.append(deg_name)
+    degrees = list(dict.fromkeys(degrees))
+
+    study_fields = []
+    for sf_m in _STUDY_FIELD_REGEX.finditer(text):
+        f_text = sf_m.group(1).strip()
+        if f_text and f_text not in study_fields:
+            study_fields.append(f_text)
+
+    qual_clause = "\n".join(p for p in (basic_q, pref_q) if p).strip()
+    study_summary = ""
+    if study_fields:
+        study_summary = "Fields of Study: " + "; ".join(study_fields[:3])
+    if qual_clause:
+        study_summary = (study_summary + " | Qualifications: " + qual_clause[:300]).strip(" |")
+    return degrees, (study_summary if study_summary else qual_clause[:350])
 
 
 def extract_job(raw):

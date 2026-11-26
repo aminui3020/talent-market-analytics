@@ -46,6 +46,12 @@ try:
 except ImportError:
     HAS_AIOHTTP = False
 
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+
 # Ensure local packages (scrapers, matching) are importable
 _CURR_DIR = os.path.dirname(os.path.abspath(__file__))
 if _CURR_DIR not in sys.path:
@@ -2257,6 +2263,133 @@ def extract_title_skills(title: str) -> List[str]:
     return found
 
 
+def _is_empty_field(val: Any) -> bool:
+    """Checks for None, NaN floats, or blank/null sentinel strings."""
+    if val is None:
+        return True
+    if isinstance(val, float):
+        import math
+        if math.isnan(val):
+            return True
+    s = str(val).strip()
+    return s == "" or s.lower() in ("nan", "none", "null")
+
+
+async def fetch_jd_content_on_demand(
+    http: AsyncHTTPClient, platform: str, url: str
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    On-demand live JD fetcher for ATS boards whose list endpoints omit full descriptions
+    (e.g. Workable, UKG, Paycom, ADP, Ashby, or when full_content was skipped).
+    Returns (raw_jd_text, extra_meta_dict).
+    """
+    if not url or not url.startswith("http"):
+        return "", {}
+    meta: Dict[str, Any] = {}
+    try:
+        if "greenhouse.io" in url:
+            m = re.search(r"greenhouse\.io/([^/]+)/jobs/(\d+)", url)
+            if m:
+                api = f"https://boards-api.greenhouse.io/v1/boards/{m.group(1)}/jobs/{m.group(2)}?content=true"
+                st, data = await http.get_json(api)
+                if st == 200 and isinstance(data, dict):
+                    if data.get("education"):
+                        meta["education"] = data.get("education")
+                    c = data.get("content") or ""
+                    if len(c) > 50:
+                        return html.unescape(c), meta
+
+        if "lever.co" in url:
+            m = re.search(r"lever\.co/([^/]+)/([a-f0-9-]+)", url)
+            if m:
+                api = f"https://api.lever.co/v0/postings/{m.group(1)}/{m.group(2)}"
+                st, data = await http.get_json(api)
+                if st == 200 and isinstance(data, dict):
+                    desc = data.get("descriptionPlain") or data.get("description", "")
+                    for lst in data.get("lists", []):
+                        desc += "\n" + (lst.get("text", "") or "") + "\n" + (lst.get("content", "") or "")
+                    if len(desc) > 50:
+                        return html.unescape(desc), meta
+
+        if "smartrecruiters.com" in url:
+            m = re.search(r"smartrecruiters\.com/([^/]+)/(\d+)", url)
+            if m:
+                api = f"https://api.smartrecruiters.com/v1/companies/{m.group(1)}/postings/{m.group(2)}"
+                st, data = await http.get_json(api)
+                if st == 200 and isinstance(data, dict):
+                    sec = data.get("jobAd", {}).get("sections", {})
+                    desc = (sec.get("jobDescription", {}).get("text", "") or "") + "\n" + (sec.get("qualifications", {}).get("text", "") or "")
+                    if len(desc) > 50:
+                        return html.unescape(desc), meta
+
+        if "workforcenow.adp.com" in url:
+            m_cid = re.search(r"cid=([^&]+)", url)
+            m_jid = re.search(r"jobId=([^&]+)", url)
+            if m_cid and m_jid:
+                api = f"https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions/{m_jid.group(1)}?cid={m_cid.group(1)}&lang=en_US"
+                st, data = await http.get_json(api)
+                if st == 200 and isinstance(data, dict):
+                    desc = data.get("requisitionDescription") or ""
+                    if len(desc) > 50:
+                        return html.unescape(desc), meta
+
+        st, html_text = await http.get_text(url)
+        if st != 200 or not html_text:
+            return "", meta
+
+        if "CandidateOpportunityDetail" in html_text:
+            m_ukg = re.search(r"new\s+US\.Opportunity\.CandidateOpportunityDetail\((.*?)\);", html_text, re.DOTALL)
+            if m_ukg:
+                try:
+                    u_data = json.loads(m_ukg.group(1))
+                    desc = u_data.get("Description") or ""
+                    if u_data.get("CompensationAnnualMinimum") or u_data.get("CompensationAnnualMaximum"):
+                        meta["salary_min"] = u_data.get("CompensationAnnualMinimum")
+                        meta["salary_max"] = u_data.get("CompensationAnnualMaximum")
+                        meta["salary_currency"] = u_data.get("CompensationCurrencyCode") or "USD"
+                    if len(desc) > 50:
+                        return html.unescape(desc), meta
+                except Exception:
+                    pass
+
+        for m in re.finditer(r"<script[^>]*>(.*?)</script>", html_text, re.DOTALL | re.IGNORECASE):
+            s_body = m.group(1).strip()
+            if "JobPosting" in s_body and ("@context" in s_body or "schema.org" in s_body):
+                try:
+                    data = json.loads(s_body)
+                    if isinstance(data, list):
+                        data = data[0]
+                    if isinstance(data, dict):
+                        if "@graph" in data and isinstance(data["@graph"], list):
+                            for node in data["@graph"]:
+                                if isinstance(node, dict) and node.get("@type") == "JobPosting":
+                                    data = node
+                                    break
+                        if data.get("@type") == "JobPosting":
+                            desc = data.get("description") or ""
+                            bs = data.get("baseSalary")
+                            if isinstance(bs, dict) and isinstance(bs.get("value"), dict):
+                                val = bs["value"]
+                                meta["salary_min"] = val.get("minValue")
+                                meta["salary_max"] = val.get("maxValue")
+                                meta["salary_currency"] = bs.get("currency", "USD")
+                            if len(desc) > 80:
+                                return html.unescape(desc), meta
+                except Exception:
+                    pass
+
+        if HAS_BS4:
+            soup = BeautifulSoup(html_text[:140000], "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                tag.decompose()
+            body = soup.get_text(separator="\n", strip=True)
+            return (body if len(body) > 200 else ""), meta
+        plain = clean_html(html_text[:140000])
+        return (plain if len(plain) > 200 else ""), meta
+    except Exception:
+        return "", meta
+
+
 def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Dict[str, Any]:
     """Enriches job dictionary with salary, skills, H-1B, and experience facts."""
     out = dict(raw)
@@ -2287,6 +2420,7 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
     out.setdefault("experience_min", None)
     out.setdefault("experience_max", None)
     out.setdefault("education", "")
+    out.setdefault("study_qualifications", "")
     out.setdefault("h1b_status", "unknown")
     out.setdefault("visa_sponsorship_status", "unknown")
     out.setdefault("sponsorship_evidence", "")
@@ -2329,6 +2463,8 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
                 out["experience_max"] = eng.get("experience_max")
                 edu = eng.get("education_requirements") or []
                 out["education"] = ", ".join(edu) if isinstance(edu, list) else str(edu)
+                if eng.get("study_qualifications"):
+                    out["study_qualifications"] = eng.get("study_qualifications") or ""
         except Exception:
             pass
 
@@ -2385,6 +2521,21 @@ def enrich_job_record(raw: Dict[str, Any], enable_enrichment: bool = True) -> Di
         elif any(w in t_low for w in ["director", "vp", "head of", "chief"]):
             out["experience_min"] = 10.0
 
+    # 7. Education & Study Qualifications fallback (handles NaN/empty safely)
+    if _is_empty_field(out.get("education")):
+        t_low = title.lower()
+        if "scientist" in t_low or "research" in t_low:
+            out["education"] = "Master's Degree / PhD preferred"
+        elif any(w in t_low for w in ["lead", "principal", "staff", "architect", "director"]):
+            out["education"] = "Bachelor's Degree in related field"
+        elif any(w in t_low for w in ["senior", "sr.", "sr "]):
+            out["education"] = "Bachelor's Degree required; Master's preferred"
+        else:
+            out["education"] = "Bachelor's Degree or equivalent experience"
+
+    if _is_empty_field(out.get("study_qualifications")):
+        out["study_qualifications"] = f"Degree: {out['education']}"
+
     return out
 
 
@@ -2421,6 +2572,7 @@ def init_db(db_path: str):
             experience_min REAL,
             experience_max REAL,
             education TEXT,
+            study_qualifications TEXT,
             h1b_status TEXT,
             visa_sponsorship_status TEXT,
             sponsorship_evidence TEXT,
@@ -2447,6 +2599,7 @@ def init_db(db_path: str):
         ("experience_min", "REAL"),
         ("experience_max", "REAL"),
         ("education", "TEXT"),
+        ("study_qualifications", "TEXT"),
         ("h1b_status", "TEXT"),
         ("visa_sponsorship_status", "TEXT"),
         ("sponsorship_evidence", "TEXT"),
@@ -2549,14 +2702,14 @@ def save_jobs_batch(db_path: str, jobs: List[Dict[str, Any]], enable_enrichment:
             apply_url, department, office, employment_type, posted_at, updated_at,
             raw_timestamp, content, salary, salary_min, salary_max, salary_currency,
             salary_period, skills, skills_required, skills_preferred, work_mode,
-            experience_min, experience_max, education, h1b_status,
+            experience_min, experience_max, education, study_qualifications, h1b_status,
             visa_sponsorship_status, sponsorship_evidence, reports_to, is_enriched, extracted_at
         ) VALUES (
             :job_id, :platform, :company_name, :company_slug, :title, :location, :is_us, :is_india,
             :apply_url, :department, :office, :employment_type, :posted_at, :updated_at,
             :raw_timestamp, :content, :salary, :salary_min, :salary_max, :salary_currency,
             :salary_period, :skills, :skills_required, :skills_preferred, :work_mode,
-            :experience_min, :experience_max, :education, :h1b_status,
+            :experience_min, :experience_max, :education, :study_qualifications, :h1b_status,
             :visa_sponsorship_status, :sponsorship_evidence, :reports_to, :is_enriched, :extracted_at
         )
     """, prepared)
@@ -2850,6 +3003,22 @@ async def run_extractor(
                     if j.get("posted_at"):
                         jobs_with_post_time += 1
 
+                if enable_enrichment and valid_comp_jobs:
+                    async def _fill_jd(job_item: Dict[str, Any]):
+                        if not (job_item.get("content") or job_item.get("description")):
+                            jd_txt, extra_meta = await fetch_jd_content_on_demand(
+                                http, platform, job_item.get("apply_url") or ""
+                            )
+                            if jd_txt:
+                                job_item["content"] = clean_html(jd_txt)
+                            if extra_meta.get("education") and not job_item.get("education"):
+                                job_item["education"] = extra_meta["education"]
+                            if extra_meta.get("salary_min") and not job_item.get("salary_min"):
+                                job_item["salary_min"] = extra_meta["salary_min"]
+                                job_item["salary_max"] = extra_meta.get("salary_max")
+                                job_item["salary_currency"] = extra_meta.get("salary_currency", "USD")
+                    await asyncio.gather(*(_fill_jd(j) for j in valid_comp_jobs), return_exceptions=True)
+
                 if len(comp_jobs) > 0:
                     boards_with_jobs += 1
 
@@ -2881,7 +3050,7 @@ async def run_extractor(
     print(f"Total Boards Returning HTTP 200: {boards_with_200:,} / {total_companies:,} ({((boards_with_200 / max(1, total_companies)) * 100):.1f}%)", flush=True)
     print(f"Total live jobs in '{output_db}': {total_jobs_saved:,}", flush=True)
     if export_csv:
-        export_sqlite_to_csv(output_db, export_csv, only_us=only_us)
+        export_sqlite_to_csv(output_db, export_csv, only_us=only_us, country=country)
 
 
 def main():
